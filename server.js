@@ -33,7 +33,13 @@ const FOLLOW_UPS = [
   "Anything else I can help with?",
   "What else can I help you with?",
   "Anything else you want to check on?",
-  "What else can I look up for you?"
+  "What else can I look up for you?",
+  "Is there anything else you'd like to know?",
+  "Need help with anything else?",
+  "Anything else I can check for you?",
+  "What else would you like to know?",
+  "Can I help you with anything else today?",
+  "Is there something else I can help with?"
 ];
 
 const NO_INPUT_REPLIES = [
@@ -60,6 +66,7 @@ Known facts:
 - Age requirement: 21 plus with valid ID
 - Website: www.thefarmersdaughtersdispensary.com
 - Menu: www.thefarmersdaughtersdispensary.com/menu
+- Shop phone number: 541-813-1711
 - First-time discounts: 5 percent first visit, 10 percent second, 15 percent third, 20 percent fourth
 
 Happy hour:
@@ -191,15 +198,19 @@ async function sendDealsText(to) {
 function getInstantAnswer(question) {
   const q = question.toLowerCase();
 
-  if (/(hours|open|close|closing|what time)/.test(q)) {
+  if (/(hours|open|close|closing|what time|how late are you open|open tonight)/.test(q)) {
     if (isNearClosing()) {
       return "We’re open until 9 PM tonight, so we’re closing soon.";
     }
     return "We’re open 9 AM to 9 PM every day.";
   }
 
-  if (/(address|where are you|location|directions|where is the store)/.test(q)) {
+  if (/(address|where are you|location|directions|where is the store|where are you located)/.test(q)) {
     return "We’re at 1025 Chetco Ave in Brookings, right off Highway 101 behind Dragon Palace and Rancho Viejo. We sit a little back off the road by the tall dispensary sign.";
+  }
+
+  if (/(phone|phone number|call you|store number|shop number)/.test(q)) {
+    return "Our shop phone number is 541-813-1711.";
   }
 
   if (/(parking|driveway|hard to find|sign)/.test(q)) {
