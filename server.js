@@ -9,57 +9,71 @@ const openai = new OpenAI({
   apiKey: process.env.OPENAI_API_KEY
 });
 
-// Pick one voice and keep it consistent.
-// Good options supported by Twilio include:
-// "Polly.Joanna-Generative"
-// "Polly.Joanna-Neural"
-// "Google.en-US-Chirp3-HD-Aoede"
-const VOICE = "Polly.Joanna-Generative";
+const VOICE = "Polly.Danielle-Neural";
 
 const GREETINGS = [
-  "Thanks for calling The Farmers Daughters Dispensary in Brookings. How can I help you today?",
-  "Thanks for calling The Farmers Daughters Dispensary. What can I help you with today?",
-  "The Farmers Daughters Dispensary, Brookings. How can I help you today?"
+  "Hi, thanks for calling The Farmers Daughters Dispensary. This is Jasmine. How can I help you today?",
+  "Thanks for calling The Farmers Daughters Dispensary. This is Jasmine. What can I help you with today?",
+  "The Farmers Daughters Dispensary in Brookings. This is Jasmine. How can I help you today?"
 ];
 
 const NO_INPUT_REPLIES = [
-  "I didn't catch that. Give me one more try.",
+  "I didn't catch that. Go ahead and ask me again.",
   "Sorry, I missed that. What can I help you with?",
-  "I didn't hear anything. Go ahead and ask me again."
+  "I didn't hear anything. Go ahead and try that again."
 ];
 
 const ERROR_REPLIES = [
-  "Sorry, I'm having trouble right now. Please call the store staff for help.",
-  "I'm having a little trouble on my end. Please try the store staff.",
-  "Sorry about that. Please call the store staff for help."
+  "Sorry about that. The live menu on the website is the best place to check.",
+  "I had a little trouble there. Best bet is the live menu on the website.",
+  "Sorry about that. You can check the live menu on the website."
 ];
 
 const SYSTEM_PROMPT = `
-You are the phone assistant for The Farmers Daughters Dispensary in Brookings, Oregon.
+You are Jasmine, the phone assistant for The Farmers Daughters Dispensary in Brookings, Oregon.
 
 Known facts:
 - Business name: The Farmers Daughters Dispensary
 - Location: Brookings, Oregon
+- Full address: 1025 Chetco Ave, Brookings, OR 97415
+- Directions: Right off Highway 101, behind Dragon Palace and Rancho Viejo. The shop sits a little back off the road by the tall dispensary sign.
 - Hours: 9 AM to 9 PM daily
 - Payment: cash and debit accepted
 - Age requirement: 21+ with valid ID
 - Website/menu: www.thefarmersdaughtersdispensary.com
 - First-time discounts: 5 percent first visit, 10 percent second, 15 percent third, 20 percent fourth
 
+Happy hour:
+- Every day from 4:20 PM to 6:20 PM
+- 20 percent off Brand Select, Cookies, Hotbox, Tyson, and Khalifa
+
+Daily deals:
+- Monday: 4x loyalty points
+- Tuesday: 20 percent off infused joints and joint packs
+- Wednesday: 20 percent off cartridges
+- Thursday: 20 percent off edibles
+- Friday: 20 percent off flower in jars
+- Saturday: 20 percent off dabs, extracts, and rosin
+- Sunday: 50 percent off ounces in jars
+
 Style:
-- Sound warm, upbeat, and natural.
+- Sound warm, relaxed, natural, and conversational.
+- Sound like a real budtender.
 - Keep answers short for phone calls.
-- Usually answer in 1 sentence.
+- Usually answer in 1 sentence, sometimes 2 short sentences.
 - Never ramble.
 - Do not repeat the exact same wording every time.
 - Use slight variation in phrasing so you sound more human.
 - Do not mention being an AI unless asked.
 
 Rules:
-- If asked about hours, payment, website, age requirement, or first-time discounts, answer directly.
-- If you do not know something, say: "I'm not sure on that. Please call the store staff for help."
+- If asked about hours, payment, website, age requirement, discounts, happy hour, address, directions, or daily deals, answer directly.
+- If asked where the store is, mention that it sits a little back off the road.
+- If asked about ordering, say orders should go through the website menu.
+- Never take orders over the phone.
 - Do not guess inventory, pricing, cannabis laws, or medical advice.
 - Do not make up specials, products, or menu items.
+- If you do not know something, say: "I don't want to give you the wrong info, but the live menu on the website is the best place to check."
 `;
 
 function pick(arr) {
@@ -67,13 +81,15 @@ function pick(arr) {
 }
 
 function cleanForPhone(text) {
-  if (!text) return "I'm not sure on that. Please call the store staff for help.";
+  if (!text) {
+    return "I don't want to give you the wrong info, but the live menu on the website is the best place to check.";
+  }
 
   return text
     .replace(/\s+/g, " ")
     .replace(/\bBrookings,\s*Oregon\b/gi, "Brookings")
     .trim()
-    .slice(0, 280); // keep it short on the phone
+    .slice(0, 220);
 }
 
 app.all("/voice", (req, res) => {
@@ -114,7 +130,8 @@ app.all("/ask", async (req, res) => {
         { role: "developer", content: SYSTEM_PROMPT },
         { role: "user", content: question }
       ],
-      max_completion_tokens: 60
+      max_completion_tokens: 50,
+      temperature: 0.5
     });
 
     const answer = cleanForPhone(
@@ -147,7 +164,7 @@ app.all("/ask", async (req, res) => {
 });
 
 app.get("/", (req, res) => {
-  res.send("Farmers Daughters AI phone server is running.");
+  res.send("Jasmine phone server is running.");
 });
 
 app.listen(process.env.PORT || 3000, () => {
