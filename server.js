@@ -26,7 +26,7 @@ const WEBSITE_URL = "https://www.thefarmersdaughtersdispensary.com";
 const GREETINGS = [
   "Thanks for calling The Farmers Daughters Dispensary. This is Jasmine. How can I help?",
   "The Farmers Daughters Dispensary, this is Jasmine. How can I help?",
-  "Thanks for calling The Farmers Daughters Dispensary. Jasmine here. What can I help you with?"
+  "Thanks for calling The Farmers Daughters Dispensary. This is Jasmine. What can I help you with?"
 ];
 
 const FOLLOW_UPS = [
