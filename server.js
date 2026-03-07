@@ -7,6 +7,8 @@ const app = express();
 app.use(express.urlencoded({ extended: false }));
 app.use(express.json());
 
+const PORT = process.env.PORT || 3000;
+
 const openai = new OpenAI({
   apiKey: process.env.OPENAI_API_KEY
 });
@@ -19,11 +21,19 @@ const twilioClient = twilio(
 const VOICE = "Polly.Danielle-Neural";
 const STORE_PHONE = process.env.TWILIO_PHONE_NUMBER;
 const MENU_URL = "https://www.thefarmersdaughtersdispensary.com/menu";
+const WEBSITE_URL = "https://www.thefarmersdaughtersdispensary.com";
 
 const GREETINGS = [
-  "Hi, thanks for calling The Farmers Daughters Dispensary. This is Jasmine. How can I help you today?",
-  "Thanks for calling The Farmers Daughters Dispensary. This is Jasmine. What can I help you with today?",
-  "The Farmers Daughters Dispensary in Brookings. This is Jasmine. How can I help you today?"
+  "Thanks for calling The Farmers Daughters Dispensary. This is Jasmine. How can I help?",
+  "The Farmers Daughters Dispensary, this is Jasmine. How can I help?",
+  "Thanks for calling The Farmers Daughters Dispensary. Jasmine here. What can I help you with?"
+];
+
+const FOLLOW_UPS = [
+  "Anything else I can help with?",
+  "What else can I help you with?",
+  "Anything else you want to check on?",
+  "What else can I look up for you?"
 ];
 
 const NO_INPUT_REPLIES = [
@@ -33,9 +43,9 @@ const NO_INPUT_REPLIES = [
 ];
 
 const ERROR_REPLIES = [
-  "Sorry about that. Best bet is the live menu on the website.",
-  "I had a little trouble there. The live menu on the website is the best place to check.",
-  "Sorry about that. You can check the live menu on the website."
+  "Sorry about that. I can help with deals, hours, directions, payment, or text you the menu.",
+  "Sorry about that. You can ask me about deals, directions, payment, or the menu.",
+  "Sorry about that. I can text you the menu or help with hours, deals, and directions."
 ];
 
 const SYSTEM_PROMPT = `
@@ -43,12 +53,11 @@ You are Jasmine, the phone assistant for The Farmers Daughters Dispensary in Bro
 
 Known facts:
 - Business name: The Farmers Daughters Dispensary
-- Location: Brookings, Oregon
 - Full address: 1025 Chetco Ave, Brookings, OR 97415
 - Directions: Right off Highway 101, behind Dragon Palace and Rancho Viejo. The shop sits a little back off the road by the tall dispensary sign.
 - Hours: 9 AM to 9 PM daily
 - Payment: cash and debit accepted
-- Age requirement: 21+ with valid ID
+- Age requirement: 21 plus with valid ID
 - Website: www.thefarmersdaughtersdispensary.com
 - Menu: www.thefarmersdaughtersdispensary.com/menu
 - First-time discounts: 5 percent first visit, 10 percent second, 15 percent third, 20 percent fourth
@@ -66,6 +75,10 @@ Daily deals:
 - Saturday: 20 percent off dabs, extracts, and rosin
 - Sunday: 50 percent off ounces in jars
 
+Vendor info:
+- Vendors should email brookingsvendors@gmail.com
+- Showing and samples can be done Monday through Friday
+
 Style:
 - Sound warm, relaxed, natural, and conversational
 - Sound like a real budtender
@@ -76,13 +89,10 @@ Style:
 - Do not mention being an AI unless asked
 
 Rules:
-- If asked about hours, payment, website, age requirement, discounts, happy hour, address, directions, or daily deals, answer directly
-- If asked where the store is, mention that it sits a little back off the road
-- If asked about ordering, say orders should go through the website menu
 - Never take orders over the phone
+- Direct orders to the website menu
 - If asked about current inventory or exact prices, prefer the live menu
 - If you do not know something, say: "I don't want to give you the wrong info, but I can text you the live menu."
-- If the caller asks for the menu by text, say you can text it over
 `;
 
 function pick(arr) {
@@ -96,9 +106,8 @@ function cleanForPhone(text) {
 
   return text
     .replace(/\s+/g, " ")
-    .replace(/\bBrookings,\s*Oregon\b/gi, "Brookings")
     .trim()
-    .slice(0, 220);
+    .slice(0, 160);
 }
 
 function normalizePhoneNumber(value) {
@@ -108,11 +117,24 @@ function normalizePhoneNumber(value) {
   return digits.startsWith("+") ? digits : `+${digits}`;
 }
 
+function getPacificNow() {
+  return new Date(
+    new Date().toLocaleString("en-US", { timeZone: "America/Los_Angeles" })
+  );
+}
+
 function getPacificDayName() {
   return new Intl.DateTimeFormat("en-US", {
     timeZone: "America/Los_Angeles",
     weekday: "long"
   }).format(new Date()).toLowerCase();
+}
+
+function isNearClosing() {
+  const now = getPacificNow();
+  const hour = now.getHours();
+  const minute = now.getMinutes();
+  return hour === 20 && minute >= 30;
 }
 
 function getTodaysDealLine() {
@@ -129,9 +151,19 @@ function getTodaysDealLine() {
   return deals[getPacificDayName()] || "You can find today’s deal on our website.";
 }
 
+function getDealsTextBody() {
+  return (
+    `Hi from The Farmers Daughters Dispensary. ` +
+    `Today’s deal: ${getTodaysDealLine()} ` +
+    `Happy hour is every day from 4:20 to 6:20 with 20 percent off Cookies, Khalifa Kush, Tyson, Select, and Hotbox. ` +
+    `Menu: ${MENU_URL}`
+  );
+}
+
 async function sendMenuText(to) {
   const phone = normalizePhoneNumber(to);
   if (!phone) throw new Error("Invalid phone number");
+  if (!STORE_PHONE) throw new Error("Missing TWILIO_PHONE_NUMBER");
 
   return twilioClient.messages.create({
     from: STORE_PHONE,
@@ -144,15 +176,25 @@ async function sendMenuText(to) {
   });
 }
 
-// Placeholder for future Weedmaps API connection
-async function lookupMenuItemInWeedmaps(query) {
-  return null;
+async function sendDealsText(to) {
+  const phone = normalizePhoneNumber(to);
+  if (!phone) throw new Error("Invalid phone number");
+  if (!STORE_PHONE) throw new Error("Missing TWILIO_PHONE_NUMBER");
+
+  return twilioClient.messages.create({
+    from: STORE_PHONE,
+    to: phone,
+    body: getDealsTextBody()
+  });
 }
 
 function getInstantAnswer(question) {
   const q = question.toLowerCase();
 
   if (/(hours|open|close|closing|what time)/.test(q)) {
+    if (isNearClosing()) {
+      return "We’re open until 9 PM tonight, so we’re closing soon.";
+    }
     return "We’re open 9 AM to 9 PM every day.";
   }
 
@@ -164,7 +206,7 @@ function getInstantAnswer(question) {
     return "Look for the tall dispensary sign and driveway. We sit a little back off the road.";
   }
 
-  if (/(payment|debit|card|cash|atm)/.test(q)) {
+  if (/(payment|debit|card|cash|atm|debit only|use card|cash back|cashback)/.test(q)) {
     return "We accept cash and debit.";
   }
 
@@ -220,24 +262,35 @@ function getInstantAnswer(question) {
     return "Orders go through the website menu. That’s the fastest way to place one.";
   }
 
-  if (/(vendor|sales rep|wholesale|appointment|meeting)/.test(q)) {
-    return "For vendor appointments, please text your name, company, and best times to this number, and the team can line it up.";
+  if (/(do you have|carry|stock|availability|have any)/.test(q)) {
+    return "The live menu is the best place to check current availability, and I can text it to you.";
+  }
+
+  if (/(vendor|sales rep|wholesale|appointment|meeting|sample|samples)/.test(q)) {
+    return "For vendors, please email brookingsvendors@gmail.com. Showing and samples can be done Monday through Friday.";
   }
 
   return null;
 }
 
-app.all("/voice", (req, res) => {
-  const vr = new VoiceResponse();
-
-  const gather = vr.gather({
+function buildGather(vr) {
+  return vr.gather({
     input: "speech",
     speechTimeout: "auto",
-    timeout: 5,
+    timeout: 4,
     action: "/ask",
     method: "POST",
     actionOnEmptyResult: true
   });
+}
+
+app.get("/", (req, res) => {
+  res.status(200).send("Jasmine phone server is running.");
+});
+
+app.post("/voice", (req, res) => {
+  const vr = new VoiceResponse();
+  const gather = buildGather(vr);
 
   gather.say({ voice: VOICE }, pick(GREETINGS));
 
@@ -245,21 +298,13 @@ app.all("/voice", (req, res) => {
   res.send(vr.toString());
 });
 
-app.all("/ask", async (req, res) => {
+app.post("/ask", async (req, res) => {
   const question = (req.body.SpeechResult || "").trim();
   const callerNumber = req.body.From;
   const vr = new VoiceResponse();
 
   if (!question) {
-    const gather = vr.gather({
-      input: "speech",
-      speechTimeout: "auto",
-      timeout: 5,
-      action: "/ask",
-      method: "POST",
-      actionOnEmptyResult: true
-    });
-
+    const gather = buildGather(vr);
     gather.say({ voice: VOICE }, pick(NO_INPUT_REPLIES));
 
     res.type("text/xml");
@@ -272,20 +317,29 @@ app.all("/ask", async (req, res) => {
         await sendMenuText(callerNumber);
         vr.say({ voice: VOICE }, "Yep, I just texted the menu over.");
       } catch (err) {
-        console.error("SMS error:", err.message);
+        console.error("SMS menu error:", err.message);
         vr.say({ voice: VOICE }, "I had trouble sending the text, but the live menu is on the website.");
       }
 
-      const gather = vr.gather({
-        input: "speech",
-        speechTimeout: "auto",
-        timeout: 5,
-        action: "/ask",
-        method: "POST",
-        actionOnEmptyResult: true
-      });
+      const gather = buildGather(vr);
+      gather.say({ voice: VOICE }, pick(FOLLOW_UPS));
 
-      gather.say({ voice: VOICE }, "Anything else I can help with?");
+      res.type("text/xml");
+      return res.send(vr.toString());
+    }
+
+    if (/(text|send).*(deal|deals|special|specials)|deal.*(text|send)|special.*(text|send)/i.test(question)) {
+      try {
+        await sendDealsText(callerNumber);
+        vr.say({ voice: VOICE }, "Yep, I just texted the deals over.");
+      } catch (err) {
+        console.error("SMS deals error:", err.message);
+        vr.say({ voice: VOICE }, "I had trouble sending the text, but I can still tell you today’s deal.");
+      }
+
+      const gather = buildGather(vr);
+      gather.say({ voice: VOICE }, pick(FOLLOW_UPS));
+
       res.type("text/xml");
       return res.send(vr.toString());
     }
@@ -294,38 +348,11 @@ app.all("/ask", async (req, res) => {
     if (instant) {
       vr.say({ voice: VOICE }, instant);
 
-      const gather = vr.gather({
-        input: "speech",
-        speechTimeout: "auto",
-        timeout: 5,
-        action: "/ask",
-        method: "POST",
-        actionOnEmptyResult: true
-      });
+      const gather = buildGather(vr);
+      gather.say({ voice: VOICE }, pick(FOLLOW_UPS));
 
-      gather.say({ voice: VOICE }, "Anything else I can help with?");
       res.type("text/xml");
       return res.send(vr.toString());
-    }
-
-    if (/do you have|carry|stock|availability|have any/i.test(question)) {
-      const item = await lookupMenuItemInWeedmaps(question);
-      if (item) {
-        vr.say({ voice: VOICE }, cleanForPhone(item));
-
-        const gather = vr.gather({
-          input: "speech",
-          speechTimeout: "auto",
-          timeout: 5,
-          action: "/ask",
-          method: "POST",
-          actionOnEmptyResult: true
-        });
-
-        gather.say({ voice: VOICE }, "Anything else I can help with?");
-        res.type("text/xml");
-        return res.send(vr.toString());
-      }
     }
 
     const response = await openai.chat.completions.create({
@@ -334,8 +361,8 @@ app.all("/ask", async (req, res) => {
         { role: "developer", content: SYSTEM_PROMPT },
         { role: "user", content: question }
       ],
-      max_completion_tokens: 40,
-      temperature: 0.35
+      max_completion_tokens: 24,
+      temperature: 0.2
     });
 
     const answer = cleanForPhone(
@@ -344,40 +371,19 @@ app.all("/ask", async (req, res) => {
 
     vr.say({ voice: VOICE }, answer);
 
-    const gather = vr.gather({
-      input: "speech",
-      speechTimeout: "auto",
-      timeout: 5,
-      action: "/ask",
-      method: "POST",
-      actionOnEmptyResult: true
-    });
-
-    gather.say({ voice: VOICE }, "Anything else I can help with?");
+    const gather = buildGather(vr);
+    gather.say({ voice: VOICE }, pick(FOLLOW_UPS));
   } catch (error) {
-    console.error("OpenAI error:", error);
+    console.error("Server error:", error);
 
-    const gather = vr.gather({
-      input: "speech",
-      speechTimeout: "auto",
-      timeout: 5,
-      action: "/ask",
-      method: "POST",
-      actionOnEmptyResult: true
-    });
-
+    const gather = buildGather(vr);
     gather.say({ voice: VOICE }, pick(ERROR_REPLIES));
-    gather.say({ voice: VOICE }, "You can also ask about deals, hours, directions, or the menu.");
   }
 
   res.type("text/xml");
   res.send(vr.toString());
 });
 
-app.get("/", (req, res) => {
-  res.send("Jasmine phone server is running.");
-});
-
-app.listen(process.env.PORT || 3000, () => {
-  console.log("Server running");
+app.listen(PORT, "0.0.0.0", () => {
+  console.log(`Server running on port ${PORT}`);
 });
