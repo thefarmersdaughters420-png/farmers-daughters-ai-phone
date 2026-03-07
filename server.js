@@ -16,7 +16,7 @@ const twilioClient = twilio(
   process.env.TWILIO_AUTH_TOKEN
 );
 
-const VOICE = "Polly.Ruth-Neural";
+const VOICE = "Polly.Danielle-Neural";
 const STORE_PHONE = process.env.TWILIO_PHONE_NUMBER;
 const MENU_URL = "https://www.thefarmersdaughtersdispensary.com/menu";
 
