@@ -1,5 +1,3 @@
-require("dotenv").config();
-
 const express = require("express");
 const OpenAI = require("openai");
 const twilio = require("twilio");
@@ -21,7 +19,6 @@ const twilioClient = twilio(
 const VOICE = "Polly.Ruth-Neural";
 const STORE_PHONE = process.env.TWILIO_PHONE_NUMBER;
 const MENU_URL = "https://www.thefarmersdaughtersdispensary.com/menu";
-const WEBSITE_URL = "https://www.thefarmersdaughtersdispensary.com";
 
 const GREETINGS = [
   "Hi, thanks for calling The Farmers Daughters Dispensary. This is Jasmine. How can I help you today?",
