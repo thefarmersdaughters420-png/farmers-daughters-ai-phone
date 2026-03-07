@@ -9,6 +9,31 @@ const openai = new OpenAI({
   apiKey: process.env.OPENAI_API_KEY
 });
 
+// Pick one voice and keep it consistent.
+// Good options supported by Twilio include:
+// "Polly.Joanna-Generative"
+// "Polly.Joanna-Neural"
+// "Google.en-US-Chirp3-HD-Aoede"
+const VOICE = "Polly.Joanna-Generative";
+
+const GREETINGS = [
+  "Thanks for calling The Farmers Daughters Dispensary in Brookings. How can I help you today?",
+  "Thanks for calling The Farmers Daughters Dispensary. What can I help you with today?",
+  "The Farmers Daughters Dispensary, Brookings. How can I help you today?"
+];
+
+const NO_INPUT_REPLIES = [
+  "I didn't catch that. Give me one more try.",
+  "Sorry, I missed that. What can I help you with?",
+  "I didn't hear anything. Go ahead and ask me again."
+];
+
+const ERROR_REPLIES = [
+  "Sorry, I'm having trouble right now. Please call the store staff for help.",
+  "I'm having a little trouble on my end. Please try the store staff.",
+  "Sorry about that. Please call the store staff for help."
+];
+
 const SYSTEM_PROMPT = `
 You are the phone assistant for The Farmers Daughters Dispensary in Brookings, Oregon.
 
@@ -21,34 +46,51 @@ Known facts:
 - Website/menu: www.thefarmersdaughtersdispensary.com
 - First-time discounts: 5 percent first visit, 10 percent second, 15 percent third, 20 percent fourth
 
+Style:
+- Sound warm, upbeat, and natural.
+- Keep answers short for phone calls.
+- Usually answer in 1 sentence.
+- Never ramble.
+- Do not repeat the exact same wording every time.
+- Use slight variation in phrasing so you sound more human.
+- Do not mention being an AI unless asked.
+
 Rules:
-- Be friendly, calm, and concise.
-- Keep answers short enough for a phone call.
+- If asked about hours, payment, website, age requirement, or first-time discounts, answer directly.
 - If you do not know something, say: "I'm not sure on that. Please call the store staff for help."
 - Do not guess inventory, pricing, cannabis laws, or medical advice.
-- Do not mention being an AI unless asked.
+- Do not make up specials, products, or menu items.
 `;
+
+function pick(arr) {
+  return arr[Math.floor(Math.random() * arr.length)];
+}
+
+function cleanForPhone(text) {
+  if (!text) return "I'm not sure on that. Please call the store staff for help.";
+
+  return text
+    .replace(/\s+/g, " ")
+    .replace(/\bBrookings,\s*Oregon\b/gi, "Brookings")
+    .trim()
+    .slice(0, 280); // keep it short on the phone
+}
 
 app.all("/voice", (req, res) => {
   const vr = new VoiceResponse();
 
   const gather = vr.gather({
     input: "speech",
-    speechTimeout: "auto",
-    timeout: 5,
+    speechTimeout: 1,
+    timeout: 3,
     action: "/ask",
     method: "POST"
   });
 
-  gather.say(
-    { voice: "Polly.Joanna" },
-    "Thanks for calling The Farmers Daughters Dispensary in Brookings. How can I help you today?"
-  );
+  gather.say({ voice: VOICE }, pick(GREETINGS));
 
-  vr.say(
-    { voice: "Polly.Joanna" },
-    "I didn't hear anything. Please call again."
-  );
+  vr.say({ voice: VOICE }, pick(NO_INPUT_REPLIES));
+  vr.redirect({ method: "POST" }, "/voice");
 
   res.type("text/xml");
   res.send(vr.toString());
@@ -59,33 +101,45 @@ app.all("/ask", async (req, res) => {
   const vr = new VoiceResponse();
 
   if (!question) {
-    vr.say({ voice: "Polly.Joanna" }, "Sorry, I did not catch that.");
+    vr.say({ voice: VOICE }, pick(NO_INPUT_REPLIES));
     vr.redirect({ method: "POST" }, "/voice");
     res.type("text/xml");
     return res.send(vr.toString());
   }
 
   try {
-    const response = await openai.responses.create({
+    const response = await openai.chat.completions.create({
       model: "gpt-4.1-mini",
-      input: [
-        { role: "system", content: SYSTEM_PROMPT },
+      messages: [
+        { role: "developer", content: SYSTEM_PROMPT },
         { role: "user", content: question }
-      ]
+      ],
+      max_completion_tokens: 60
     });
 
-    const answer =
-      (response.output_text || "").trim() ||
-      "I'm sorry, I don't have that answer right now.";
+    const answer = cleanForPhone(
+      response.choices?.[0]?.message?.content || ""
+    );
 
-    vr.say({ voice: "Polly.Joanna" }, answer);
-    vr.redirect({ method: "POST" }, "/voice");
+    vr.say({ voice: VOICE }, answer);
+    vr.pause({ length: 1 });
+
+    const gather = vr.gather({
+      input: "speech",
+      speechTimeout: 1,
+      timeout: 3,
+      action: "/ask",
+      method: "POST"
+    });
+
+    gather.say({ voice: VOICE }, "Anything else I can help with?");
+
+    vr.say({ voice: VOICE }, pick(NO_INPUT_REPLIES));
+    vr.hangup();
   } catch (error) {
     console.error("OpenAI error:", error);
-    vr.say(
-      { voice: "Polly.Joanna" },
-      "Sorry, I am having trouble answering right now."
-    );
+    vr.say({ voice: VOICE }, pick(ERROR_REPLIES));
+    vr.hangup();
   }
 
   res.type("text/xml");
