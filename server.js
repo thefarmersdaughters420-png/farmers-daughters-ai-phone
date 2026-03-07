@@ -25,7 +25,7 @@ const WEBSITE_URL = "https://www.thefarmersdaughtersdispensary.com";
 
 const GREETINGS = [
   "Thanks for calling The Farmers Daughters Dispensary. This is Jasmine. Sorry we with a customer, How can I help?",
-  "The Farmers Daughters Dispensary, this is Jasmine. The Shop is a little budy right now, How can I help?",
+  "The Farmers Daughters Dispensary, this is Jasmine. The Shop is a little busy right now, How can I help?",
   "Thanks for calling The Farmers Daughters Dispensary. This is Jasmine. The main budtender is busy, What can I help you with?"
 ];
 
