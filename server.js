@@ -18,166 +18,243 @@ const twilioClient = twilio(
   process.env.TWILIO_AUTH_TOKEN
 );
 
+// ---------- STORE SETTINGS ----------
 const VOICE = "Polly.Danielle-Neural";
 const STORE_PHONE = process.env.TWILIO_PHONE_NUMBER;
 const MENU_URL = "https://www.thefarmersdaughtersdispensary.com/menu";
 const WEBSITE_URL = "https://www.thefarmersdaughtersdispensary.com";
+const STORE_ADDRESS = "1025 Chetco Ave, Brookings, Oregon 97415";
+const STORE_PHONE_SPOKEN = "541-813-1711";
 
-// Lightweight in-memory conversation state keyed by Twilio CallSid.
-// This survives for the lifetime of the server process and is enough for short phone calls.
+// Optional Weedmaps live-menu integration.
+// Add these in Railway Variables when credentials are available.
+const WEEDMAPS_ACCESS_TOKEN = process.env.WEEDMAPS_ACCESS_TOKEN || "";
+const WEEDMAPS_MENU_ID = process.env.WEEDMAPS_MENU_ID || "";
+const WEEDMAPS_API_BASE = "https://api-g.weedmaps.com/wm/2025-07/partners";
+
+// ---------- CALL MEMORY ----------
 const callMemory = new Map();
 const CALL_MEMORY_TTL_MS = 30 * 60 * 1000;
 
+function getCallState(callSid) {
+  if (!callSid) {
+    return {
+      history: [],
+      pendingAction: null,
+      callerNumber: null,
+      updatedAt: Date.now()
+    };
+  }
+
+  const existing = callMemory.get(callSid);
+
+  if (existing && Date.now() - existing.updatedAt < CALL_MEMORY_TTL_MS) {
+    existing.updatedAt = Date.now();
+    return existing;
+  }
+
+  const fresh = {
+    history: [],
+    pendingAction: null,
+    callerNumber: null,
+    updatedAt: Date.now()
+  };
+
+  callMemory.set(callSid, fresh);
+  return fresh;
+}
+
+function saveTurn(state, role, content) {
+  state.history.push({ role, content });
+  state.history = state.history.slice(-6);
+  state.updatedAt = Date.now();
+}
+
+// Clean old calls periodically.
+setInterval(() => {
+  const now = Date.now();
+  for (const [callSid, state] of callMemory.entries()) {
+    if (now - state.updatedAt > CALL_MEMORY_TTL_MS) {
+      callMemory.delete(callSid);
+    }
+  }
+}, 10 * 60 * 1000).unref();
+
+// ---------- LANGUAGE ----------
 const GREETINGS = [
   "Thanks for calling The Farmers Daughters Dispensary. This is Jasmine. How can I help?",
   "The Farmers Daughters Dispensary, this is Jasmine. What can I help you with?",
   "Thanks for calling The Farmers Daughters Dispensary. This is Jasmine. What can I do for you?"
 ];
 
-const FOLLOW_UPS = [
-  "Anything else I can help with?",
-  "What else can I help you with?",
-  "Anything else you want to check on?",
-  "What else can I look up for you?",
-  "Is there anything else you'd like to know?",
-  "Need help with anything else?",
-  "Anything else I can check for you?",
-  "What else would you like to know?",
-  "Can I help you with anything else today?",
-  "Is there something else I can help with?"
-];
-
 const NO_INPUT_REPLIES = [
   "I didn't catch that. Go ahead and ask me again.",
   "Sorry, I missed that. What can I help you with?",
-  "I didn't hear anything. Go ahead and try that again."
+  "I didn't hear anything. Try that again for me."
 ];
 
 const ERROR_REPLIES = [
-  "Sorry about that. I can help with deals, hours, directions, payment, or text you the menu.",
-  "Sorry about that. You can ask me about deals, directions, payment, or the menu.",
-  "Sorry about that. I can text you the menu or help with hours, deals, and directions."
+  "Sorry about that. I can help with hours, deals, directions, or text you the menu.",
+  "Sorry, I had trouble with that. Ask me about the menu, hours, deals, or directions."
 ];
 
 const SYSTEM_PROMPT = `
 You are Jasmine, the phone assistant for The Farmers Daughters Dispensary in Brookings, Oregon.
 
-Known facts:
-- Business name: The Farmers Daughters Dispensary
-- Full address: 1025 Chetco Ave, Brookings, OR 97415
+Store facts:
+- Address: ${STORE_ADDRESS}
 - Directions: Right off Highway 101, behind Dragon Palace and Rancho Viejo. The shop sits a little back off the road by the tall dispensary sign.
-- Hours: 9 AM to 9 PM daily
-- Payment: cash and debit accepted
-- Age requirement: 21 plus with valid ID
-- Website: www.thefarmersdaughtersdispensary.com
-- Menu: www.thefarmersdaughtersdispensary.com/menu
-- Shop phone number: 541-813-1711
-- First-time discounts: 5 percent first visit, 10 percent second, 15 percent third, 20 percent fourth
+- Hours: 9 AM to 9 PM every day.
+- Payment: cash and debit.
+- Age requirement: 21 or older with valid ID.
+- Website: ${WEBSITE_URL}
+- Menu and online ordering: ${MENU_URL}
+- Shop phone: ${STORE_PHONE_SPOKEN}
+- First-time discounts: 5 percent first visit, 10 percent second, 15 percent third, 20 percent fourth.
+- Happy hour: every day from 4:20 PM to 6:20 PM, 20 percent off Cookies, Khalifa Kush, Tyson, Select, and Hotbox.
+- Monday: four times loyalty points.
+- Tuesday: 20 percent off infused joints and joint packs.
+- Wednesday: 20 percent off cartridges.
+- Thursday: 20 percent off edibles.
+- Friday: 20 percent off flower in jars.
+- Saturday: 20 percent off dabs, extracts, and rosin.
+- Sunday: 50 percent off ounces in jars.
+- Vendors: brookingsvendors@gmail.com. Showing and samples Monday through Friday.
 
-Happy hour:
-- Every day from 4:20 PM to 6:20 PM
-- 20 percent off Cookies, Khalifa Kush, Tyson, Select, and Hotbox
-
-Daily deals:
-- Monday deals four time Loyalty points
-- Tuesday: 20 percent off infused joints and joint packs
-- Wednesday: 20 percent off cartridges
-- Thursday: 20 percent off edibles
-- Friday: 20 percent off flower in jars
-- Saturday: 20 percent off dabs, extracts, and rosin
-- Sunday: 50 percent off ounces in jars
-
-Vendor info:
-- Vendors should email brookingsvendors@gmail.com
-- Showing and samples can be done Monday through Friday
-
-Style:
-- Sound warm, relaxed, natural, and conversational
-- Sound like a real budtender
-- Keep answers short for phone calls
-- Usually answer in 1 sentence, sometimes 2 short sentences
-- Never ramble
-- Do not repeat the exact same wording every time
-- Do not mention being an AI unless asked
-
-Rules:
-- Never take orders over the phone
-- Direct orders to the website menu
-- If asked about current inventory or exact prices, prefer the live menu
-- If you do not know something, say: "I don't want to give you the wrong info, but I can text you the live menu."
-- If a caller asks how to order, explain that orders go through the live online menu and offer to text the link.
-- If the caller says yes after you offered to text the menu/order link, treat that as permission to send it.
+Phone style:
+- Warm, relaxed and natural.
+- Sound like a knowledgeable budtender.
+- Keep most answers to one short sentence.
+- Never ramble.
+- Do not say you are an AI unless directly asked.
+- Never claim inventory is in stock unless live menu data was successfully checked.
 - Never claim a text was sent unless the application successfully sent it.
+- Never take an order over the phone. Direct ordering to the online menu.
 `;
 
+// ---------- HELPERS ----------
 function pick(arr) {
   return arr[Math.floor(Math.random() * arr.length)];
 }
 
 function cleanForPhone(text) {
-  if (!text) {
-    return "I don't want to give you the wrong info, but I can text you the live menu.";
-  }
-
-  return text
-    .replace(/\s+/g, " ")
-    .trim()
-    .slice(0, 280);
+  if (!text) return "I don't want to give you the wrong information.";
+  return text.replace(/\s+/g, " ").trim().slice(0, 320);
 }
 
 function normalizePhoneNumber(value) {
   if (!value) return null;
-  const digits = String(value).replace(/[^\d+]/g, "");
-  if (!digits) return null;
-  return digits.startsWith("+") ? digits : `+${digits}`;
+
+  const raw = String(value).trim();
+
+  // Twilio can sometimes use non-phone identities such as client:xxxxx.
+  if (/^(client|sip):/i.test(raw)) return null;
+
+  const digits = raw.replace(/\D/g, "");
+
+  // US 10-digit number.
+  if (digits.length === 10) return `+1${digits}`;
+
+  // US number already containing country code.
+  if (digits.length === 11 && digits.startsWith("1")) return `+${digits}`;
+
+  // Generic E.164-compatible international length.
+  if (digits.length >= 8 && digits.length <= 15) return `+${digits}`;
+
+  return null;
 }
 
-function getPacificNow() {
-  return new Date(
-    new Date().toLocaleString("en-US", { timeZone: "America/Los_Angeles" })
-  );
-}
-
-function getPacificDayName() {
-  return new Intl.DateTimeFormat("en-US", {
+function getPacificParts() {
+  const formatter = new Intl.DateTimeFormat("en-US", {
     timeZone: "America/Los_Angeles",
-    weekday: "long"
-  }).format(new Date()).toLowerCase();
+    weekday: "long",
+    hour: "numeric",
+    minute: "numeric",
+    hour12: false
+  });
+
+  const parts = Object.fromEntries(
+    formatter.formatToParts(new Date()).map(p => [p.type, p.value])
+  );
+
+  return {
+    day: (parts.weekday || "").toLowerCase(),
+    hour: Number(parts.hour),
+    minute: Number(parts.minute)
+  };
 }
 
-function isNearClosing() {
-  const now = getPacificNow();
-  const hour = now.getHours();
-  const minute = now.getMinutes();
-  return hour === 20 && minute >= 30;
+function getStoreStatusLine() {
+  const { hour, minute } = getPacificParts();
+  const nowMinutes = hour * 60 + minute;
+  const open = 9 * 60;
+  const close = 21 * 60;
+
+  if (nowMinutes < open) {
+    return "We're closed right now and open at 9 AM today.";
+  }
+
+  if (nowMinutes >= close) {
+    return "We're closed for the night and open again at 9 AM tomorrow.";
+  }
+
+  if (nowMinutes >= close - 30) {
+    return "We're open until 9 PM tonight, so we're closing soon.";
+  }
+
+  return "We're open right now until 9 PM.";
 }
 
 function getTodaysDealLine() {
+  const { day } = getPacificParts();
+
   const deals = {
-    monday: "Monday deals four time Loyalty points.",
-    tuesday: "Today’s deal is 20 percent off infused joints and joint packs.",
-    wednesday: "Today’s deal is 20 percent off cartridges.",
-    thursday: "Today’s deal is 20 percent off edibles.",
-    friday: "Today’s deal is 20 percent off flower in jars.",
-    saturday: "Today’s deal is 20 percent off dabs, extracts, and rosin.",
-    sunday: "Today’s deal is 50 percent off ounces in jars."
+    monday: "Today's deal is four times loyalty points.",
+    tuesday: "Today's deal is 20 percent off infused joints and joint packs.",
+    wednesday: "Today's deal is 20 percent off cartridges.",
+    thursday: "Today's deal is 20 percent off edibles.",
+    friday: "Today's deal is 20 percent off flower in jars.",
+    saturday: "Today's deal is 20 percent off dabs, extracts, and rosin.",
+    sunday: "Today's deal is 50 percent off ounces in jars."
   };
 
-  return deals[getPacificDayName()] || "You can find today’s deal on our website.";
+  return deals[day] || "You can check today's deal on our website.";
 }
 
-function getDealsTextBody() {
+function isAffirmative(text) {
+  return /^(yes|yeah|yep|sure|please|ok|okay|absolutely|send it|text it|do it|that works)\b/i.test(text.trim());
+}
+
+function isNegative(text) {
+  return /^(no|nope|nah|not right now|i'?m good)\b/i.test(text.trim());
+}
+
+function wantsMenuText(text) {
+  const q = text.toLowerCase();
   return (
-    `Hi from The Farmers Daughters Dispensary. ` +
-    `Today’s deal: ${getTodaysDealLine()} ` +
-    `Happy hour is every day from 4:20 to 6:20 with 20 percent off Cookies, Khalifa Kush, Tyson, Select, and Hotbox. ` +
-    `Menu: ${MENU_URL}`
+    /(text|send|message).*(menu|link|order|ordering|website)/.test(q) ||
+    /(menu|link|order|ordering|website).*(text|send|message)/.test(q) ||
+    /text me/.test(q) ||
+    /send it to me/.test(q)
   );
 }
 
+function isOrderingQuestion(text) {
+  return /(how do i order|how can i order|where do i order|can i order online|online order|place an order|order online|ordering link)/i.test(text);
+}
+
+function isInventoryQuestion(text) {
+  return /(do you have|have any|in stock|carry|inventory|what.*(flower|cart|cartridge|edible|preroll|pre-roll|joint|dab|extract|rosin|concentrate|ounce|oz)|what strains|what brands)/i.test(text);
+}
+
+// ---------- SMS ----------
 async function sendMenuText(to) {
   const phone = normalizePhoneNumber(to);
-  if (!phone) throw new Error("Invalid phone number");
+
+  console.log("SMS destination raw:", to);
+  console.log("SMS destination normalized:", phone);
+
+  if (!phone) throw new Error(`Invalid phone number: ${String(to)}`);
   if (!STORE_PHONE) throw new Error("Missing TWILIO_PHONE_NUMBER");
 
   return twilioClient.messages.create({
@@ -193,102 +270,219 @@ async function sendMenuText(to) {
 
 async function sendDealsText(to) {
   const phone = normalizePhoneNumber(to);
-  if (!phone) throw new Error("Invalid phone number");
+
+  if (!phone) throw new Error(`Invalid phone number: ${String(to)}`);
   if (!STORE_PHONE) throw new Error("Missing TWILIO_PHONE_NUMBER");
 
   return twilioClient.messages.create({
     from: STORE_PHONE,
     to: phone,
-    body: getDealsTextBody()
+    body:
+      `The Farmers Daughters Dispensary\n` +
+      `${getTodaysDealLine()}\n` +
+      `Happy hour: 4:20-6:20 PM daily.\n` +
+      `Menu: ${MENU_URL}`
   });
 }
 
+// ---------- WEEDMAPS LIVE MENU ----------
+let menuCache = {
+  items: [],
+  fetchedAt: 0
+};
 
-function getCallState(callSid) {
-  if (!callSid) return { history: [], pendingAction: null, updatedAt: Date.now() };
-  const existing = callMemory.get(callSid);
-  if (existing && Date.now() - existing.updatedAt < CALL_MEMORY_TTL_MS) {
-    existing.updatedAt = Date.now();
-    return existing;
+const MENU_CACHE_MS = 45 * 1000;
+
+function liveMenuConfigured() {
+  return Boolean(WEEDMAPS_ACCESS_TOKEN && WEEDMAPS_MENU_ID);
+}
+
+async function fetchLiveMenuItems() {
+  if (!liveMenuConfigured()) {
+    throw new Error("Live Weedmaps menu is not configured");
   }
-  const fresh = { history: [], pendingAction: null, updatedAt: Date.now() };
-  callMemory.set(callSid, fresh);
-  return fresh;
+
+  if (
+    menuCache.items.length &&
+    Date.now() - menuCache.fetchedAt < MENU_CACHE_MS
+  ) {
+    return menuCache.items;
+  }
+
+  let page = 1;
+  let allItems = [];
+
+  while (page <= 5) {
+    const url =
+      `${WEEDMAPS_API_BASE}/menus/${encodeURIComponent(WEEDMAPS_MENU_ID)}/items` +
+      `?page_size=150&page=${page}`;
+
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 3500);
+
+    let response;
+
+    try {
+      response = await fetch(url, {
+        headers: {
+          Authorization: `Bearer ${WEEDMAPS_ACCESS_TOKEN}`,
+          Accept: "application/json"
+        },
+        signal: controller.signal
+      });
+    } finally {
+      clearTimeout(timeout);
+    }
+
+    if (!response.ok) {
+      const body = await response.text();
+      throw new Error(`Weedmaps ${response.status}: ${body.slice(0, 250)}`);
+    }
+
+    const payload = await response.json();
+    const pageItems = Array.isArray(payload.data) ? payload.data : [];
+
+    allItems = allItems.concat(pageItems);
+
+    const total = Number(payload?.meta?.total || allItems.length);
+
+    if (!pageItems.length || allItems.length >= total || pageItems.length < 150) {
+      break;
+    }
+
+    page += 1;
+  }
+
+  menuCache = {
+    items: allItems,
+    fetchedAt: Date.now()
+  };
+
+  console.log(`Live menu refreshed: ${allItems.length} items`);
+  return allItems;
 }
 
-function saveTurn(state, role, content) {
-  state.history.push({ role, content });
-  // Keep only the most recent turns so calls stay fast and inexpensive.
-  state.history = state.history.slice(-8);
-  state.updatedAt = Date.now();
+function itemSearchText(item) {
+  try {
+    return JSON.stringify(item).toLowerCase();
+  } catch {
+    return String(item || "").toLowerCase();
+  }
 }
 
-function isAffirmative(text) {
-  return /^(yes|yeah|yep|sure|please|ok|okay|absolutely|do it|send it|text it|that would be great)\b/i.test(text.trim());
-}
-
-function isNegative(text) {
-  return /^(no|nope|nah|not right now|i'm good|im good)\b/i.test(text.trim());
-}
-
-function wantsMenuOrOrderText(text) {
-  const q = text.toLowerCase();
+function itemName(item) {
   return (
-    /(text|send|message).*(menu|link|order|website)/.test(q) ||
-    /(menu|order|ordering|website).*(text|send|message)/.test(q) ||
-    /(send me|text me).*(where|how).*(order|buy)/.test(q) ||
-    /(text|send).*(where|how).*(order|buy)/.test(q)
+    item?.name ||
+    item?.product?.name ||
+    item?.brand_product?.name ||
+    item?.external_name ||
+    "menu item"
   );
 }
 
-function isOrderingQuestion(text) {
-  return /(how do i order|how can i order|where do i order|can i order online|online order|place an order|order online|ordering)/i.test(text);
+function inventoryKeywords(question) {
+  const stop = new Set([
+    "do","you","have","any","what","which","is","are","in","stock","carry",
+    "inventory","right","now","today","please","can","i","get","me","your",
+    "the","a","an","of","some","kind","kinds","available"
+  ]);
+
+  return question
+    .toLowerCase()
+    .replace(/pre[\s-]?rolls?/g, "preroll")
+    .replace(/cartridges?/g, "cartridge")
+    .replace(/carts?/g, "cartridge")
+    .replace(/concentrates?/g, "concentrate")
+    .replace(/extracts?/g, "extract")
+    .split(/[^a-z0-9]+/)
+    .filter(word => word.length > 1 && !stop.has(word));
 }
 
-function getStoreStatusLine() {
-  const now = getPacificNow();
-  const minutes = now.getHours() * 60 + now.getMinutes();
-  const open = 9 * 60;
-  const close = 21 * 60;
+async function answerInventoryQuestion(question) {
+  if (!liveMenuConfigured()) {
+    return {
+      answered: true,
+      text: "I can check live inventory once the Weedmaps menu connection is turned on. For now, I can text you the live online menu."
+    };
+  }
 
-  if (minutes < open) return "We’re closed right now and open at 9 AM today.";
-  if (minutes >= close) return "We’re closed for the night and open again at 9 AM tomorrow.";
-  if (minutes >= close - 30) return "We’re open until 9 PM tonight, so we’re closing soon.";
-  return "We’re open right now until 9 PM.";
+  try {
+    const items = await fetchLiveMenuItems();
+    const keywords = inventoryKeywords(question);
+
+    let matches = items;
+
+    if (keywords.length) {
+      matches = items.filter(item => {
+        const haystack = itemSearchText(item);
+        return keywords.every(k => haystack.includes(k));
+      });
+
+      // If strict matching finds nothing, loosen it to any keyword.
+      if (!matches.length) {
+        matches = items.filter(item => {
+          const haystack = itemSearchText(item);
+          return keywords.some(k => haystack.includes(k));
+        });
+      }
+    }
+
+    const uniqueNames = [...new Set(matches.map(itemName).filter(Boolean))];
+
+    if (!uniqueNames.length) {
+      return {
+        answered: true,
+        text: "I checked the live menu and I don't see a match right now. I can text you the menu if you'd like."
+      };
+    }
+
+    const sample = uniqueNames.slice(0, 5);
+
+    if (/do you have|have any|in stock|carry/i.test(question) && uniqueNames.length <= 5) {
+      return {
+        answered: true,
+        text: `Yes. I found ${sample.join(", ")} on the live menu.`
+      };
+    }
+
+    const more = uniqueNames.length > sample.length
+      ? `, plus ${uniqueNames.length - sample.length} more`
+      : "";
+
+    return {
+      answered: true,
+      text: `On the live menu I found ${sample.join(", ")}${more}.`
+    };
+  } catch (error) {
+    console.error("Live menu error:", error.message);
+    return {
+      answered: true,
+      text: "I couldn't reach the live menu just now, but I can text you the ordering link."
+    };
+  }
 }
 
-function buildListen(vr, retryCount = 0) {
-  return vr.gather({
-    input: "speech",
-    speechTimeout: "auto",
-    timeout: 5,
-    action: `/ask?retryCount=${retryCount}`,
-    method: "POST",
-    actionOnEmptyResult: true,
-    hints: "menu, order, ordering, online order, flower, cartridge, cart, pre-roll, preroll, edible, concentrate, dab, rosin, Cookies, Khalifa Kush, Tyson, Select, Hotbox"
-  });
-}
-
+// ---------- FAST LOCAL ANSWERS ----------
 function getInstantAnswer(question) {
   const q = question.toLowerCase();
 
-  if (/(hours|open|close|closing|what time|how late are you open|open tonight)/.test(q)) {
-    return `${getStoreStatusLine()} Our regular hours are 9 AM to 9 PM every day.`;
+  if (/(hours|open|close|closing|what time|how late|open tonight|open right now)/.test(q)) {
+    return getStoreStatusLine();
   }
 
   if (/(address|where are you|location|directions|where is the store|where are you located)/.test(q)) {
-    return "We’re at 1025 Chetco Ave in Brookings, right off Highway 101 behind Dragon Palace and Rancho Viejo. We sit a little back off the road by the tall dispensary sign.";
+    return "We're at 1025 Chetco Ave in Brookings, right off Highway 101 behind Dragon Palace and Rancho Viejo.";
   }
 
-  if (/(phone|phone number|call you|store number|shop number)/.test(q)) {
-    return "Our shop phone number is 541-813-1711.";
+  if (/(phone|phone number|store number|shop number)/.test(q)) {
+    return `Our shop number is ${STORE_PHONE_SPOKEN}.`;
   }
 
   if (/(parking|driveway|hard to find|sign)/.test(q)) {
     return "Look for the tall dispensary sign and driveway. We sit a little back off the road.";
   }
 
-  if (/(payment|debit|card|cash|atm|debit only|use card|cash back|cashback)/.test(q)) {
+  if (/(payment|debit|card|cash|atm|cashback|cash back)/.test(q)) {
     return "We accept cash and debit.";
   }
 
@@ -296,11 +490,7 @@ function getInstantAnswer(question) {
     return "You must be 21 or older with a valid ID.";
   }
 
-  if (/(menu|website|online menu)/.test(q) && !/(text|send)/.test(q)) {
-    return "The live menu is on our website at thefarmersdaughtersdispensary.com.";
-  }
-
-  if (/(first time|first visit|new customer|loyalty discount)/.test(q)) {
+  if (/(first time|first visit|new customer|first-time)/.test(q)) {
     return "First visit is 5 percent off, second is 10 percent, third is 15, and fourth is 20 percent.";
   }
 
@@ -312,60 +502,108 @@ function getInstantAnswer(question) {
     return getTodaysDealLine();
   }
 
-  if (/\bmonday\b/.test(q) && /deal|special|monday/.test(q)) {
-    return "Monday deals four time Loyalty points.";
+  if (/\bmonday\b/.test(q) && /(deal|special)/.test(q)) {
+    return "Monday is four times loyalty points.";
   }
 
-  if (/\btuesday\b/.test(q) && /deal|special|tuesday/.test(q)) {
+  if (/\btuesday\b/.test(q) && /(deal|special)/.test(q)) {
     return "Tuesday is 20 percent off infused joints and joint packs.";
   }
 
-  if (/\bwednesday\b/.test(q) && /deal|special|wednesday/.test(q)) {
+  if (/\bwednesday\b/.test(q) && /(deal|special)/.test(q)) {
     return "Wednesday is 20 percent off cartridges.";
   }
 
-  if (/\bthursday\b/.test(q) && /deal|special|thursday/.test(q)) {
+  if (/\bthursday\b/.test(q) && /(deal|special)/.test(q)) {
     return "Thursday is 20 percent off edibles.";
   }
 
-  if (/\bfriday\b/.test(q) && /deal|special|friday/.test(q)) {
+  if (/\bfriday\b/.test(q) && /(deal|special)/.test(q)) {
     return "Friday is 20 percent off flower in jars.";
   }
 
-  if (/\bsaturday\b/.test(q) && /deal|special|saturday/.test(q)) {
+  if (/\bsaturday\b/.test(q) && /(deal|special)/.test(q)) {
     return "Saturday is 20 percent off dabs, extracts, and rosin.";
   }
 
-  if (/\bsunday\b/.test(q) && /deal|special|sunday/.test(q)) {
+  if (/\bsunday\b/.test(q) && /(deal|special)/.test(q)) {
     return "Sunday is 50 percent off ounces in jars.";
   }
 
-  if (/(order|pickup|place order|buy over the phone|ordering|order online)/.test(q)) {
-    return "Orders go through our live online menu. I can text you the ordering link if you want.";
+  if (/(vendor|sales rep|wholesale|appointment|sample|samples)/.test(q)) {
+    return "Vendors should email brookingsvendors@gmail.com. Showing and samples can be done Monday through Friday.";
   }
 
-  if (/(do you have|carry|stock|availability|have any)/.test(q)) {
-    return "The live menu is the best place to check current availability, and I can text it to you.";
-  }
-
-  if (/(vendor|sales rep|wholesale|appointment|meeting|sample|samples)/.test(q)) {
-    return "For vendors, please email brookingsvendors@gmail.com. Showing and samples can be done Monday through Friday.";
+  if (/(menu|website|online menu)/.test(q) && !/(text|send|message)/.test(q) && !isOrderingQuestion(q)) {
+    return "The live menu and online ordering are at thefarmersdaughtersdispensary.com slash menu.";
   }
 
   return null;
 }
 
-function buildGather(vr, retryCount = 0) {
-  return buildListen(vr, retryCount);
+// ---------- TWILIO LISTENING ----------
+function buildListen(vr, retryCount = 0) {
+  return vr.gather({
+    input: "speech",
+    speechTimeout: "auto",
+    timeout: 3,
+    action: `/ask?retryCount=${retryCount}`,
+    method: "POST",
+    actionOnEmptyResult: true,
+    hints: [
+      "flower",
+      "cartridge",
+      "cart",
+      "preroll",
+      "pre-roll",
+      "edible",
+      "rosin",
+      "dab",
+      "extract",
+      "concentrate",
+      "ounce",
+      "Cookies",
+      "Khalifa Kush",
+      "Tyson",
+      "Select",
+      "Hotbox"
+    ].join(",")
+  });
 }
 
+function continueListening(vr) {
+  buildListen(vr, 0);
+}
+
+// ---------- ROUTES ----------
 app.get("/", (req, res) => {
   res.status(200).send("Jasmine phone server is running.");
 });
 
+app.get("/health", (req, res) => {
+  res.json({
+    ok: true,
+    liveMenuConfigured: liveMenuConfigured(),
+    menuCacheItems: menuCache.items.length,
+    uptimeSeconds: Math.round(process.uptime())
+  });
+});
+
 app.post("/voice", (req, res) => {
+  const callSid = req.body.CallSid;
+  const state = getCallState(callSid);
+
+  state.callerNumber =
+    req.body.From ||
+    req.body.Caller ||
+    req.body.CallerNumber ||
+    null;
+
+  console.log("Incoming CallSid:", callSid);
+  console.log("Incoming caller number:", state.callerNumber);
+
   const vr = new VoiceResponse();
-  const gather = buildGather(vr, 0);
+  const gather = buildListen(vr, 0);
 
   gather.say({ voice: VOICE }, pick(GREETINGS));
 
@@ -375,21 +613,37 @@ app.post("/voice", (req, res) => {
 
 app.post("/ask", async (req, res) => {
   const question = (req.body.SpeechResult || "").trim();
-  const callerNumber = req.body.From;
+  const retryCount = parseInt(req.query.retryCount || "0", 10);
   const callSid = req.body.CallSid;
   const state = getCallState(callSid);
-  const retryCount = parseInt(req.query.retryCount || "0", 10);
+
+  const callerNumber =
+    req.body.From ||
+    req.body.Caller ||
+    req.body.CallerNumber ||
+    state.callerNumber ||
+    null;
+
+  if (callerNumber) state.callerNumber = callerNumber;
+
   const vr = new VoiceResponse();
+
+  console.log("Speech:", question);
+  console.log("Caller for /ask:", callerNumber);
 
   if (!question) {
     if (retryCount >= 1) {
-      vr.say({ voice: VOICE }, "Thanks for calling The Farmers Daughters Dispensary. Have a good day.");
+      vr.say(
+        { voice: VOICE },
+        "Thanks for calling The Farmers Daughters Dispensary. Have a good day."
+      );
       vr.hangup();
+
       res.type("text/xml");
       return res.send(vr.toString());
     }
 
-    const gather = buildGather(vr, retryCount + 1);
+    const gather = buildListen(vr, retryCount + 1);
     gather.say({ voice: VOICE }, pick(NO_INPUT_REPLIES));
 
     res.type("text/xml");
@@ -397,98 +651,143 @@ app.post("/ask", async (req, res) => {
   }
 
   try {
-    if (state.pendingAction === "sendMenu" && isNegative(question)) {
+    // Caller says yes/no after Jasmine offered a text.
+    if (state.pendingAction === "sendMenu") {
+      if (isAffirmative(question)) {
+        try {
+          await sendMenuText(callerNumber);
+          state.pendingAction = null;
+          vr.say({ voice: VOICE }, "Yep, I just texted the menu and ordering link over.");
+        } catch (error) {
+          console.error("SMS menu error:", error.message);
+          vr.say({ voice: VOICE }, "I still couldn't send the text. The menu is on our website.");
+        }
+
+        continueListening(vr);
+        res.type("text/xml");
+        return res.send(vr.toString());
+      }
+
+      if (isNegative(question)) {
+        state.pendingAction = null;
+        vr.say({ voice: VOICE }, "No problem.");
+        continueListening(vr);
+
+        res.type("text/xml");
+        return res.send(vr.toString());
+      }
+
+      // If they asked something else, clear the pending offer and handle the new question.
       state.pendingAction = null;
-      saveTurn(state, "user", question);
-      saveTurn(state, "assistant", "No problem.");
-      vr.say({ voice: VOICE }, "No problem.");
-      buildListen(vr, 0);
-      res.type("text/xml");
-      return res.send(vr.toString());
     }
 
-    if (wantsMenuOrOrderText(question) || (state.pendingAction === "sendMenu" && isAffirmative(question))) {
+    // Direct menu/order text request.
+    if (wantsMenuText(question)) {
       try {
         await sendMenuText(callerNumber);
-        state.pendingAction = null;
-        saveTurn(state, "user", question);
-        saveTurn(state, "assistant", "Yep, I just texted the menu and ordering link over.");
         vr.say({ voice: VOICE }, "Yep, I just texted the menu and ordering link over.");
-      } catch (err) {
-        console.error("SMS menu error:", err.message);
-        state.pendingAction = null;
-        vr.say({ voice: VOICE }, "I had trouble sending the text, but the live menu and ordering page are on our website.");
+      } catch (error) {
+        console.error("SMS menu error:", error.message);
+        vr.say({ voice: VOICE }, "I couldn't send the text, but the menu is on our website.");
       }
 
-      buildListen(vr, 0);
-
+      continueListening(vr);
       res.type("text/xml");
       return res.send(vr.toString());
     }
 
-    if (/(text|send).*(deal|deals|special|specials)|deal.*(text|send)|special.*(text|send)/i.test(question)) {
+    // Direct deals text request.
+    if (/(text|send|message).*(deal|deals|special|specials)|deal.*(text|send|message)|special.*(text|send|message)/i.test(question)) {
       try {
         await sendDealsText(callerNumber);
-        vr.say({ voice: VOICE }, "Yep, I just texted the deals over.");
-      } catch (err) {
-        console.error("SMS deals error:", err.message);
-        vr.say({ voice: VOICE }, "I had trouble sending the text, but I can still tell you today’s deal.");
+        vr.say({ voice: VOICE }, "Yep, I just texted today's deal and the menu over.");
+      } catch (error) {
+        console.error("SMS deals error:", error.message);
+        vr.say({ voice: VOICE }, "I couldn't send the text, but I can tell you today's deal.");
       }
 
-      buildListen(vr, 0);
-
+      continueListening(vr);
       res.type("text/xml");
       return res.send(vr.toString());
     }
 
-    if (isOrderingQuestion(question) && !wantsMenuOrOrderText(question)) {
+    // Ordering questions: offer to text the link and remember that offer.
+    if (isOrderingQuestion(question)) {
       state.pendingAction = "sendMenu";
-      saveTurn(state, "user", question);
-      saveTurn(state, "assistant", "Orders go through our live online menu. Want me to text you the ordering link?");
-      vr.say({ voice: VOICE }, "Orders go through our live online menu. Want me to text you the ordering link?");
-      buildListen(vr, 0);
+      vr.say(
+        { voice: VOICE },
+        "Orders go through our live online menu. Want me to text you the ordering link?"
+      );
+
+      continueListening(vr);
       res.type("text/xml");
       return res.send(vr.toString());
     }
 
+    // Live inventory/menu questions.
+    if (isInventoryQuestion(question)) {
+      const inventory = await answerInventoryQuestion(question);
+
+      if (/text you|text.*menu|ordering link/i.test(inventory.text)) {
+        state.pendingAction = "sendMenu";
+      }
+
+      vr.say({ voice: VOICE }, inventory.text);
+      continueListening(vr);
+
+      res.type("text/xml");
+      return res.send(vr.toString());
+    }
+
+    // Fast local answers avoid an OpenAI round-trip and greatly reduce lag.
     const instant = getInstantAnswer(question);
-    if (instant) {
-      saveTurn(state, "user", question);
-      saveTurn(state, "assistant", instant);
-      if (/I can text you/i.test(instant)) state.pendingAction = "sendMenu";
-      vr.say({ voice: VOICE }, instant);
 
-      buildListen(vr, 0);
+    if (instant) {
+      vr.say({ voice: VOICE }, instant);
+      continueListening(vr);
 
       res.type("text/xml");
       return res.send(vr.toString());
     }
 
-    const response = await openai.chat.completions.create({
+    // AI fallback only when local logic did not already answer.
+    saveTurn(state, "user", question);
+
+    const aiMessages = [
+      { role: "developer", content: SYSTEM_PROMPT },
+      ...state.history
+    ];
+
+    const aiRequest = openai.chat.completions.create({
       model: "gpt-4.1-mini",
-      messages: [
-        { role: "developer", content: SYSTEM_PROMPT },
-        ...state.history,
-        { role: "user", content: question }
-      ],
-      max_completion_tokens: 80,
+      messages: aiMessages,
+      max_completion_tokens: 70,
       temperature: 0.2
     });
 
-    const answer = cleanForPhone(
-      response.choices?.[0]?.message?.content || ""
+    const timeout = new Promise((_, reject) =>
+      setTimeout(() => reject(new Error("AI timeout")), 4500)
     );
 
-    saveTurn(state, "user", question);
+    const response = await Promise.race([aiRequest, timeout]);
+
+    const answer = cleanForPhone(
+      response?.choices?.[0]?.message?.content || ""
+    );
+
     saveTurn(state, "assistant", answer);
-    if (/text you/i.test(answer) && /(menu|order|link)/i.test(answer)) state.pendingAction = "sendMenu";
+
+    // If AI offers to text the menu, remember it.
+    if (/want me to text|i can text|text you.*menu|text you.*link/i.test(answer)) {
+      state.pendingAction = "sendMenu";
+    }
+
     vr.say({ voice: VOICE }, answer);
-
-    buildListen(vr, 0);
+    continueListening(vr);
   } catch (error) {
-    console.error("Server error:", error);
+    console.error("Server error:", error.message || error);
 
-    const gather = buildGather(vr, 1);
+    const gather = buildListen(vr, 1);
     gather.say({ voice: VOICE }, pick(ERROR_REPLIES));
   }
 
@@ -497,5 +796,6 @@ app.post("/ask", async (req, res) => {
 });
 
 app.listen(PORT, "0.0.0.0", () => {
-  console.log(`Server running on port ${PORT}`);
+  console.log(`Jasmine server running on port ${PORT}`);
+  console.log(`Live Weedmaps menu configured: ${liveMenuConfigured()}`);
 });
