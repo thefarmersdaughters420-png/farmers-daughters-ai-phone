@@ -23,10 +23,15 @@ const STORE_PHONE = process.env.TWILIO_PHONE_NUMBER;
 const MENU_URL = "https://www.thefarmersdaughtersdispensary.com/menu";
 const WEBSITE_URL = "https://www.thefarmersdaughtersdispensary.com";
 
+// Lightweight in-memory conversation state keyed by Twilio CallSid.
+// This survives for the lifetime of the server process and is enough for short phone calls.
+const callMemory = new Map();
+const CALL_MEMORY_TTL_MS = 30 * 60 * 1000;
+
 const GREETINGS = [
-  "Thanks for calling The Farmers Daughters Dispensary. This is Jasmine. Sorry we with a customer, How can I help?",
-  "The Farmers Daughters Dispensary, this is Jasmine. The Shop is a little busy right now, How can I help?",
-  "Thanks for calling The Farmers Daughters Dispensary. This is Jasmine. The main budtender is busy, What can I help you with?"
+  "Thanks for calling The Farmers Daughters Dispensary. This is Jasmine. How can I help?",
+  "The Farmers Daughters Dispensary, this is Jasmine. What can I help you with?",
+  "Thanks for calling The Farmers Daughters Dispensary. This is Jasmine. What can I do for you?"
 ];
 
 const FOLLOW_UPS = [
@@ -100,6 +105,9 @@ Rules:
 - Direct orders to the website menu
 - If asked about current inventory or exact prices, prefer the live menu
 - If you do not know something, say: "I don't want to give you the wrong info, but I can text you the live menu."
+- If a caller asks how to order, explain that orders go through the live online menu and offer to text the link.
+- If the caller says yes after you offered to text the menu/order link, treat that as permission to send it.
+- Never claim a text was sent unless the application successfully sent it.
 `;
 
 function pick(arr) {
@@ -114,7 +122,7 @@ function cleanForPhone(text) {
   return text
     .replace(/\s+/g, " ")
     .trim()
-    .slice(0, 160);
+    .slice(0, 280);
 }
 
 function normalizePhoneNumber(value) {
@@ -176,10 +184,10 @@ async function sendMenuText(to) {
     from: STORE_PHONE,
     to: phone,
     body:
-      `Hi from The Farmers Daughters Dispensary. ` +
-      `Here is the live menu: ${MENU_URL} ` +
-      `Orders go through the website. ` +
-      `We are at 1025 Chetco Ave in Brookings, behind Dragon Palace and Rancho Viejo.`
+      `The Farmers Daughters Dispensary\n` +
+      `Live menu & online ordering: ${MENU_URL}\n` +
+      `1025 Chetco Ave, Brookings\n` +
+      `Open daily 9 AM-9 PM`
   });
 }
 
@@ -195,14 +203,77 @@ async function sendDealsText(to) {
   });
 }
 
+
+function getCallState(callSid) {
+  if (!callSid) return { history: [], pendingAction: null, updatedAt: Date.now() };
+  const existing = callMemory.get(callSid);
+  if (existing && Date.now() - existing.updatedAt < CALL_MEMORY_TTL_MS) {
+    existing.updatedAt = Date.now();
+    return existing;
+  }
+  const fresh = { history: [], pendingAction: null, updatedAt: Date.now() };
+  callMemory.set(callSid, fresh);
+  return fresh;
+}
+
+function saveTurn(state, role, content) {
+  state.history.push({ role, content });
+  // Keep only the most recent turns so calls stay fast and inexpensive.
+  state.history = state.history.slice(-8);
+  state.updatedAt = Date.now();
+}
+
+function isAffirmative(text) {
+  return /^(yes|yeah|yep|sure|please|ok|okay|absolutely|do it|send it|text it|that would be great)\b/i.test(text.trim());
+}
+
+function isNegative(text) {
+  return /^(no|nope|nah|not right now|i'm good|im good)\b/i.test(text.trim());
+}
+
+function wantsMenuOrOrderText(text) {
+  const q = text.toLowerCase();
+  return (
+    /(text|send|message).*(menu|link|order|website)/.test(q) ||
+    /(menu|order|ordering|website).*(text|send|message)/.test(q) ||
+    /(send me|text me).*(where|how).*(order|buy)/.test(q) ||
+    /(text|send).*(where|how).*(order|buy)/.test(q)
+  );
+}
+
+function isOrderingQuestion(text) {
+  return /(how do i order|how can i order|where do i order|can i order online|online order|place an order|order online|ordering)/i.test(text);
+}
+
+function getStoreStatusLine() {
+  const now = getPacificNow();
+  const minutes = now.getHours() * 60 + now.getMinutes();
+  const open = 9 * 60;
+  const close = 21 * 60;
+
+  if (minutes < open) return "We’re closed right now and open at 9 AM today.";
+  if (minutes >= close) return "We’re closed for the night and open again at 9 AM tomorrow.";
+  if (minutes >= close - 30) return "We’re open until 9 PM tonight, so we’re closing soon.";
+  return "We’re open right now until 9 PM.";
+}
+
+function buildListen(vr, retryCount = 0) {
+  return vr.gather({
+    input: "speech",
+    speechTimeout: "auto",
+    timeout: 5,
+    action: `/ask?retryCount=${retryCount}`,
+    method: "POST",
+    actionOnEmptyResult: true,
+    hints: "menu, order, ordering, online order, flower, cartridge, cart, pre-roll, preroll, edible, concentrate, dab, rosin, Cookies, Khalifa Kush, Tyson, Select, Hotbox"
+  });
+}
+
 function getInstantAnswer(question) {
   const q = question.toLowerCase();
 
   if (/(hours|open|close|closing|what time|how late are you open|open tonight)/.test(q)) {
-    if (isNearClosing()) {
-      return "We’re open until 9 PM tonight, so we’re closing soon.";
-    }
-    return "We’re open 9 AM to 9 PM every day.";
+    return `${getStoreStatusLine()} Our regular hours are 9 AM to 9 PM every day.`;
   }
 
   if (/(address|where are you|location|directions|where is the store|where are you located)/.test(q)) {
@@ -269,8 +340,8 @@ function getInstantAnswer(question) {
     return "Sunday is 50 percent off ounces in jars.";
   }
 
-  if (/(order|pickup|place order|buy over the phone)/.test(q)) {
-    return "Orders go through the website menu. That’s the fastest way to place one.";
+  if (/(order|pickup|place order|buy over the phone|ordering|order online)/.test(q)) {
+    return "Orders go through our live online menu. I can text you the ordering link if you want.";
   }
 
   if (/(do you have|carry|stock|availability|have any)/.test(q)) {
@@ -285,14 +356,7 @@ function getInstantAnswer(question) {
 }
 
 function buildGather(vr, retryCount = 0) {
-  return vr.gather({
-    input: "speech",
-    speechTimeout: "auto",
-    timeout: 4,
-    action: `/ask?retryCount=${retryCount}`,
-    method: "POST",
-    actionOnEmptyResult: true
-  });
+  return buildListen(vr, retryCount);
 }
 
 app.get("/", (req, res) => {
@@ -312,6 +376,8 @@ app.post("/voice", (req, res) => {
 app.post("/ask", async (req, res) => {
   const question = (req.body.SpeechResult || "").trim();
   const callerNumber = req.body.From;
+  const callSid = req.body.CallSid;
+  const state = getCallState(callSid);
   const retryCount = parseInt(req.query.retryCount || "0", 10);
   const vr = new VoiceResponse();
 
@@ -331,17 +397,30 @@ app.post("/ask", async (req, res) => {
   }
 
   try {
-    if (/(text|send).*(menu|link)|menu.*(text|send)/i.test(question)) {
+    if (state.pendingAction === "sendMenu" && isNegative(question)) {
+      state.pendingAction = null;
+      saveTurn(state, "user", question);
+      saveTurn(state, "assistant", "No problem.");
+      vr.say({ voice: VOICE }, "No problem.");
+      buildListen(vr, 0);
+      res.type("text/xml");
+      return res.send(vr.toString());
+    }
+
+    if (wantsMenuOrOrderText(question) || (state.pendingAction === "sendMenu" && isAffirmative(question))) {
       try {
         await sendMenuText(callerNumber);
-        vr.say({ voice: VOICE }, "Yep, I just texted the menu over.");
+        state.pendingAction = null;
+        saveTurn(state, "user", question);
+        saveTurn(state, "assistant", "Yep, I just texted the menu and ordering link over.");
+        vr.say({ voice: VOICE }, "Yep, I just texted the menu and ordering link over.");
       } catch (err) {
         console.error("SMS menu error:", err.message);
-        vr.say({ voice: VOICE }, "I had trouble sending the text, but the live menu is on the website.");
+        state.pendingAction = null;
+        vr.say({ voice: VOICE }, "I had trouble sending the text, but the live menu and ordering page are on our website.");
       }
 
-      const gather = buildGather(vr, 0);
-      gather.say({ voice: VOICE }, pick(FOLLOW_UPS));
+      buildListen(vr, 0);
 
       res.type("text/xml");
       return res.send(vr.toString());
@@ -356,19 +435,30 @@ app.post("/ask", async (req, res) => {
         vr.say({ voice: VOICE }, "I had trouble sending the text, but I can still tell you today’s deal.");
       }
 
-      const gather = buildGather(vr, 0);
-      gather.say({ voice: VOICE }, pick(FOLLOW_UPS));
+      buildListen(vr, 0);
 
+      res.type("text/xml");
+      return res.send(vr.toString());
+    }
+
+    if (isOrderingQuestion(question) && !wantsMenuOrOrderText(question)) {
+      state.pendingAction = "sendMenu";
+      saveTurn(state, "user", question);
+      saveTurn(state, "assistant", "Orders go through our live online menu. Want me to text you the ordering link?");
+      vr.say({ voice: VOICE }, "Orders go through our live online menu. Want me to text you the ordering link?");
+      buildListen(vr, 0);
       res.type("text/xml");
       return res.send(vr.toString());
     }
 
     const instant = getInstantAnswer(question);
     if (instant) {
+      saveTurn(state, "user", question);
+      saveTurn(state, "assistant", instant);
+      if (/I can text you/i.test(instant)) state.pendingAction = "sendMenu";
       vr.say({ voice: VOICE }, instant);
 
-      const gather = buildGather(vr, 0);
-      gather.say({ voice: VOICE }, pick(FOLLOW_UPS));
+      buildListen(vr, 0);
 
       res.type("text/xml");
       return res.send(vr.toString());
@@ -378,9 +468,10 @@ app.post("/ask", async (req, res) => {
       model: "gpt-4.1-mini",
       messages: [
         { role: "developer", content: SYSTEM_PROMPT },
+        ...state.history,
         { role: "user", content: question }
       ],
-      max_completion_tokens: 24,
+      max_completion_tokens: 80,
       temperature: 0.2
     });
 
@@ -388,10 +479,12 @@ app.post("/ask", async (req, res) => {
       response.choices?.[0]?.message?.content || ""
     );
 
+    saveTurn(state, "user", question);
+    saveTurn(state, "assistant", answer);
+    if (/text you/i.test(answer) && /(menu|order|link)/i.test(answer)) state.pendingAction = "sendMenu";
     vr.say({ voice: VOICE }, answer);
 
-    const gather = buildGather(vr, 0);
-    gather.say({ voice: VOICE }, pick(FOLLOW_UPS));
+    buildListen(vr, 0);
   } catch (error) {
     console.error("Server error:", error);
 
