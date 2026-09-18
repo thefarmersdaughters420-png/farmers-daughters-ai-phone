@@ -102,8 +102,8 @@ async function main() {
 
       body: JSON.stringify({
         body:
-          "The Farmers Daughters Dispensary: " +
-          "Here is the menu you requested: {{url}}",
+  "The Farmers Daughters: " +
+  "The information you requested is ready. View it here: {{url}}",
 
         unsubscribeText:
           "Reply STOP to unsubscribe"
