@@ -50,15 +50,22 @@ const VENDOR_EMAIL =
 const FALLBACK_VOICE =
   "Polly.Danielle-Neural";
 
+/*
+  A sound has to continue this long while
+  Jasmine is talking before it is treated
+  as a real interruption.
+*/
+const BARGE_IN_CONFIRM_MS = 250;
+
 let inventoryCache = {
   fetchedAt: 0,
   rows: []
 };
 
 
-/* --------------------------------
+/* =========================================================
    BASIC HELPERS
--------------------------------- */
+========================================================= */
 
 function phone(v) {
 
@@ -66,15 +73,15 @@ function phone(v) {
     return null;
   }
 
-  const r =
+  const raw =
     String(v).trim();
 
-  if (/^(client|sip):/i.test(r)) {
+  if (/^(client|sip):/i.test(raw)) {
     return null;
   }
 
   const d =
-    r.replace(/\D/g, "");
+    raw.replace(/\D/g, "");
 
   if (d.length === 10) {
     return `+1${d}`;
@@ -170,9 +177,9 @@ function now() {
 }
 
 
-/* --------------------------------
+/* =========================================================
    STORE STATUS
--------------------------------- */
+========================================================= */
 
 function status() {
 
@@ -206,9 +213,9 @@ function status() {
 }
 
 
-/* --------------------------------
+/* =========================================================
    DAILY DEALS
--------------------------------- */
+========================================================= */
 
 function deal() {
 
@@ -240,9 +247,9 @@ function deal() {
 }
 
 
-/* --------------------------------
+/* =========================================================
    TWILIO WEBSOCKET URL
--------------------------------- */
+========================================================= */
 
 function wsUrl(req) {
 
@@ -281,20 +288,16 @@ function wsUrl(req) {
 }
 
 
-/* ================================================================
-   FLOWHUB LIVE INVENTORY
-================================================================ */
-
-
-/*
-  Normalize words for inventory searching.
-*/
+/* =========================================================
+   FLOWHUB INVENTORY
+========================================================= */
 
 function normalizeText(value) {
 
   return String(
     value || ""
   )
+
     .toLowerCase()
 
     .replace(
@@ -310,14 +313,6 @@ function normalizeText(value) {
     .trim();
 }
 
-
-/*
-  Very small singularizer so:
-
-  gummies -> gummy
-  carts -> cart
-  edibles -> edible
-*/
 
 function singularize(token) {
 
@@ -346,11 +341,6 @@ function singularize(token) {
   return token;
 }
 
-
-/*
-  Remove conversational filler and
-  add useful dispensary synonyms.
-*/
 
 function queryTokens(query) {
 
@@ -387,6 +377,7 @@ function queryTokens(query) {
       "your"
 
     ]);
+
 
   const aliases = {
 
@@ -513,11 +504,6 @@ function queryTokens(query) {
 }
 
 
-/*
-  Get current quantity from the
-  Flowhub item.
-*/
-
 function quantityOf(row) {
 
   const raw =
@@ -542,11 +528,6 @@ function quantityOf(row) {
     : null;
 }
 
-
-/*
-  Build searchable text from
-  SAFE product information only.
-*/
 
 function itemSearchText(row) {
 
@@ -582,11 +563,6 @@ function itemSearchText(row) {
   );
 }
 
-
-/*
-  Give Jasmine cannabinoid information
-  without exposing private Flowhub fields.
-*/
 
 function cannabinoidSummary(row) {
 
@@ -651,18 +627,10 @@ function cannabinoidSummary(row) {
         unit:
           x.unitOfMeasure ||
           null
-
       })
     );
 }
 
-
-/*
-  Flowhub weight-tier pricing.
-
-  Flowhub supplies prices as cents,
-  so 2500 becomes $25.
-*/
 
 function weightTierSummary(row) {
 
@@ -734,25 +702,7 @@ function weightTierSummary(row) {
 }
 
 
-/*
-  IMPORTANT:
-
-  This is the ONLY Flowhub inventory
-  information that gets passed back
-  to the voice model.
-
-  No client IDs.
-  No costs.
-  No regulatory IDs.
-  No internal IDs.
-  No private analytics.
-*/
-
 function publicInventoryItem(row) {
-
-  const quantity =
-    quantityOf(row);
-
 
   return {
 
@@ -780,7 +730,7 @@ function publicInventoryItem(row) {
       null,
 
     quantityAvailable:
-      quantity,
+      quantityOf(row),
 
     weightTiers:
       weightTierSummary(
@@ -794,10 +744,6 @@ function publicInventoryItem(row) {
   };
 }
 
-
-/*
-  Rank search matches.
-*/
 
 function scoreInventoryRow(
   row,
@@ -817,35 +763,13 @@ function scoreInventoryRow(
   }
 
 
-  let score = 0;
-
-
-  if (
+  let score =
     phrase &&
-    text.includes(
-      phrase
-    )
-  ) {
+    text.includes(phrase)
 
-    score += 20;
-  }
+      ? 20
 
-
-  for (
-    const token of tokens
-  ) {
-
-    if (
-      text.includes(
-        normalizeText(
-          token
-        )
-      )
-    ) {
-
-      score += 4;
-    }
-  }
+      : 0;
 
 
   const productName =
@@ -873,6 +797,15 @@ function scoreInventoryRow(
 
     if (
       t &&
+      text.includes(t)
+    ) {
+
+      score += 4;
+    }
+
+
+    if (
+      t &&
       productName.includes(t)
     ) {
 
@@ -893,14 +826,6 @@ function scoreInventoryRow(
   return score;
 }
 
-
-/*
-  Pull current inventory from Flowhub.
-
-  Cache for 60 seconds so Jasmine
-  does not burn through Flowhub's
-  API request limit.
-*/
 
 async function fetchFlowhubInventory() {
 
@@ -1065,10 +990,6 @@ async function fetchFlowhubInventory() {
 }
 
 
-/*
-  Search live Flowhub inventory.
-*/
-
 async function searchFlowhubInventory(
   query
 ) {
@@ -1131,11 +1052,7 @@ async function searchFlowhubInventory(
       .filter(
         x =>
           x.quantity !== null &&
-          x.quantity > 0
-      )
-
-      .filter(
-        x =>
+          x.quantity > 0 &&
           x.score > 0
       )
 
@@ -1145,11 +1062,6 @@ async function searchFlowhubInventory(
           a.score
       );
 
-
-  /*
-    Combine duplicate batches
-    of the same product.
-  */
 
   const merged =
     new Map();
@@ -1273,9 +1185,9 @@ async function searchFlowhubInventory(
 
       message:
 
-        `I checked live Flowhub inventory and did not find an in-stock match for "${cleanQuery}". ` +
+        `I checked live inventory and did not find an in-stock match for "${cleanQuery}". ` +
 
-        "Do not guess. Say you did not find a current match and offer to text the live online menu."
+        "Do not guess. Offer to text the live online menu."
     };
   }
 
@@ -1299,25 +1211,16 @@ async function searchFlowhubInventory(
 
     message:
 
-      `I checked live Flowhub inventory and found ${results.length} matching in-stock item${results.length === 1 ? "" : "s"}. ` +
+      `I found ${results.length} matching in-stock item${results.length === 1 ? "" : "s"}. ` +
 
-      "Answer from these results only. Do not invent other products or prices."
+      "Answer from these results only."
   };
 }
 
 
-/* ================================================================
-   BLACKLEAF TEXTING
-================================================================ */
-
-
-/*
-  We intentionally do NOT use
-  templateId or sendingProfileId.
-
-  This is the Blackleaf method that
-  already worked in production.
-*/
+/* =========================================================
+   BLACKLEAF SMS
+========================================================= */
 
 async function textLink(to) {
 
@@ -1448,7 +1351,8 @@ async function textLink(to) {
     data?.accepted === false ||
 
     String(
-      data?.status || ""
+      data?.status ||
+      ""
     )
       .toLowerCase() ===
       "rejected";
@@ -1490,14 +1394,14 @@ async function textLink(to) {
 }
 
 
-/* ================================================================
+/* =========================================================
    JASMINE INSTRUCTIONS
-================================================================ */
+========================================================= */
 
 const INSTRUCTIONS = `
 You are Jasmine, the phone assistant for The Farmers Daughters Dispensary in Brookings, Oregon.
 
-Speak naturally like a knowledgeable budtender. Be warm, relaxed, confident, and concise. Most answers should be one or two short sentences. Let callers interrupt.
+Speak naturally like a knowledgeable budtender. Be warm, relaxed, confident, and concise. Most answers should be one or two short sentences. Let callers interrupt after the opening greeting.
 
 Do not say you are an AI unless directly asked. If asked, say you are the shop's automated phone assistant.
 
@@ -1523,19 +1427,19 @@ Store facts:
 - Vendors: ${VENDOR_EMAIL}. Showing and samples Monday-Friday.
 
 Inventory rules:
-- Live Flowhub inventory is connected through check_live_inventory.
+- Live inventory is connected through check_live_inventory.
 - For ANY question about whether a product, brand, category, strain, edible, cart, concentrate, flower, pre-roll, or other item is currently available, call check_live_inventory before answering.
 - Answer inventory questions only from the tool result.
-- If the tool says found=false, say you did not find a current in-stock match. Do not say the shop never carries it.
+- If found=false, say you did not find a current in-stock match. Do not say the shop never carries it.
 - If the tool fails, say you cannot verify inventory right now and offer to text the live online menu.
-- Do not read exact quantity to the caller unless they specifically ask how much is available. Quantity units can differ by product type.
-- Only quote a price if the tool result actually includes that price.
+- Do not read exact quantity unless specifically asked.
+- Only quote a price if the tool result includes it.
 - Never reveal SKU, regulatory IDs, API credentials, internal IDs, costs, wholesale cost, or private inventory metadata.
 
 Privacy rules:
 - You do not have access to sales totals, revenue, profit, margins, costs, customer records, employee information, payroll, or other private business analytics.
-- If a caller asks for private business information, say: "I don't have access to private business information like sales or profits."
-- Never attempt to infer private business numbers from inventory or other information.
+- If asked for private business information, say: "I don't have access to private business information like sales or profits."
+- Never infer private business numbers from inventory.
 
 Other rules:
 - Use get_store_status for current open/closed status.
@@ -1550,9 +1454,9 @@ Other rules:
 `;
 
 
-/* ================================================================
+/* =========================================================
    OPENAI TOOLS
-================================================================ */
+========================================================= */
 
 const TOOLS = [
 
@@ -1612,7 +1516,7 @@ const TOOLS = [
       "check_live_inventory",
 
     description:
-      "Search the dispensary's live Flowhub inventory for a product, brand, category, strain, or product type. Use this before answering any current stock question.",
+      "Search live inventory for a product, brand, category, strain, or product type before answering current stock questions.",
 
     parameters: {
 
@@ -1627,7 +1531,7 @@ const TOOLS = [
             "string",
 
           description:
-            "Short inventory search phrase, for example Drops gummies, rosin, Blue Dream, carts, or Cookies."
+            "Short search phrase such as Drops gummies, rosin, carts, Blue Dream, or Cookies."
         }
       },
 
@@ -1724,9 +1628,9 @@ const TOOLS = [
 ];
 
 
-/* ================================================================
+/* =========================================================
    TOOL EXECUTION
-================================================================ */
+========================================================= */
 
 async function tool(
   name,
@@ -1767,10 +1671,6 @@ async function tool(
   }
 
 
-  /*
-    LIVE FLOWHUB INVENTORY
-  */
-
   if (
     name ===
     "check_live_inventory"
@@ -1809,10 +1709,6 @@ async function tool(
     }
   }
 
-
-  /*
-    BLACKLEAF SMS
-  */
 
   if (
     name ===
@@ -1876,10 +1772,6 @@ async function tool(
   }
 
 
-  /*
-    UNKNOWN QUESTION LOG
-  */
-
   if (
     name ===
     "record_unknown_question"
@@ -1935,9 +1827,9 @@ async function tool(
 }
 
 
-/* ================================================================
-   WEB ROUTES
-================================================================ */
+/* =========================================================
+   HTTP ROUTES
+========================================================= */
 
 app.get(
 
@@ -1986,14 +1878,20 @@ app.get(
         Boolean(
           FLOWHUB_CLIENT_ID &&
           FLOWHUB_API_TOKEN
-        )
+        ),
+
+      bargeInConfirmMs:
+        BARGE_IN_CONFIRM_MS,
+
+      vadEagerness:
+        "medium"
     })
 );
 
 
-/* ================================================================
-   TWILIO VOICE ENTRY
-================================================================ */
+/* =========================================================
+   TWILIO VOICE
+========================================================= */
 
 app.post(
 
@@ -2119,9 +2017,9 @@ app.post(
 );
 
 
-/* ================================================================
-   HTTP + WEBSOCKET SERVER
-================================================================ */
+/* =========================================================
+   SERVER + WEBSOCKET
+========================================================= */
 
 const server =
   http.createServer(
@@ -2147,13 +2045,13 @@ server.on(
     head
   ) => {
 
-    let p =
+    let path =
       "";
 
 
     try {
 
-      p =
+      path =
         new URL(
 
           req.url,
@@ -2170,7 +2068,7 @@ server.on(
 
 
     if (
-      p !==
+      path !==
       "/media-stream"
     ) {
 
@@ -2202,9 +2100,9 @@ server.on(
 );
 
 
-/* ================================================================
+/* =========================================================
    TWILIO ↔ OPENAI REALTIME
-================================================================ */
+========================================================= */
 
 wss.on(
 
@@ -2255,6 +2153,38 @@ wss.on(
 
     let pending =
       [];
+
+
+    /*
+      INTERRUPTION STATE
+    */
+
+    let assistantPlaying =
+      false;
+
+    let greetingPlaying =
+      false;
+
+    let responseActive =
+      false;
+
+    let queuedResponse =
+      false;
+
+    let speechActive =
+      false;
+
+    let speechStartedAt =
+      0;
+
+    let speechTimer =
+      null;
+
+    let bargeInConfirmed =
+      false;
+
+    let userSpokeDuringGreeting =
+      false;
 
 
     const done =
@@ -2316,164 +2246,272 @@ wss.on(
       };
 
 
-    const reset =
-      () => {
+    function clearSpeechTimer() {
 
-        startTs =
+      if (
+        speechTimer
+      ) {
+
+        clearTimeout(
+          speechTimer
+        );
+
+        speechTimer =
           null;
-
-        itemId =
-          null;
-
-        mark =
-          null;
-      };
+      }
+    }
 
 
-    const clear =
-      () => {
+    function resetPlayback() {
 
-        if (!sid) {
-          return;
-        }
+      startTs =
+        null;
 
+      itemId =
+        null;
 
-        toTw({
+      mark =
+        null;
 
-          event:
-            "clear",
-
-          streamSid:
-            sid
-        });
+      assistantPlaying =
+        false;
+    }
 
 
-        if (
-          itemId &&
-          startTs !== null
-        ) {
+    /*
+      Twilio is responsible for actually
+      playing Jasmine's audio.
 
-          toOA({
+      When a REAL interruption occurs we
+      clear Twilio's buffered audio and
+      truncate OpenAI's conversation item
+      to what the caller actually heard.
+    */
 
-            type:
-              "conversation.item.truncate",
+    function truncateCurrentAudio() {
 
-            item_id:
-              itemId,
-
-            content_index:
-              0,
-
-            audio_end_ms:
-              Math.max(
-
-                0,
-
-                Math.floor(
-                  lastTs -
-                  startTs
-                )
-              )
-          });
-        }
+      if (!sid) {
+        return;
+      }
 
 
-        reset();
-      };
+      toTw({
+
+        event:
+          "clear",
+
+        streamSid:
+          sid
+      });
 
 
-    const markDone =
-      () => {
-
-        if (
-          !sid ||
-          !itemId
-        ) {
-
-          return;
-        }
-
-
-        mark =
-          `jasmine-${++markN}`;
-
-
-        toTw({
-
-          event:
-            "mark",
-
-          streamSid:
-            sid,
-
-          mark: {
-
-            name:
-              mark
-          }
-        });
-      };
-
-
-    const flush =
-      () => {
-
-        if (!ready) {
-          return;
-        }
-
-
-        for (
-          const a of pending
-        ) {
-
-          toOA({
-
-            type:
-              "input_audio_buffer.append",
-
-            audio:
-              a
-          });
-        }
-
-
-        pending =
-          [];
-      };
-
-
-    const greet =
-      () => {
-
-        if (
-          !ready ||
-          greeted
-        ) {
-
-          return;
-        }
-
-
-        greeted =
-          true;
-
+      if (
+        itemId &&
+        startTs !== null
+      ) {
 
         toOA({
 
           type:
-            "response.create",
+            "conversation.item.truncate",
 
-          response: {
+          item_id:
+            itemId,
 
-            input:
-              [],
+          content_index:
+            0,
 
-            instructions:
-              "Say exactly: Thanks for calling The Farmers Daughters Dispensary. This is Jasmine. How can I help?"
-          }
+          audio_end_ms:
+            Math.max(
+
+              0,
+
+              Math.floor(
+                lastTs -
+                startTs
+              )
+            )
         });
-      };
+      }
+
+
+      resetPlayback();
+    }
+
+
+    function cancelAssistantForBargeIn() {
+
+      if (
+        !assistantPlaying ||
+        greetingPlaying
+      ) {
+
+        return;
+      }
+
+
+      console.log(
+        "Confirmed caller interruption; stopping Jasmine."
+      );
+
+
+      if (
+        responseActive
+      ) {
+
+        toOA({
+
+          type:
+            "response.cancel"
+        });
+      }
+
+
+      truncateCurrentAudio();
+    }
+
+
+    function markDone() {
+
+      if (
+        !sid ||
+        !itemId
+      ) {
+
+        return;
+      }
+
+
+      mark =
+        `jasmine-${++markN}`;
+
+
+      toTw({
+
+        event:
+          "mark",
+
+        streamSid:
+          sid,
+
+        mark: {
+
+          name:
+            mark
+        }
+      });
+    }
+
+
+    function flush() {
+
+      if (!ready) {
+        return;
+      }
+
+
+      for (
+        const audio of pending
+      ) {
+
+        toOA({
+
+          type:
+            "input_audio_buffer.append",
+
+          audio:
+            audio
+        });
+      }
+
+
+      pending =
+        [];
+    }
+
+
+    /*
+      Because automatic Realtime responses
+      are disabled, OUR code decides when
+      a valid caller turn gets a response.
+    */
+
+    function requestResponse() {
+
+      if (
+        !ready ||
+        !open(oa)
+      ) {
+
+        return;
+      }
+
+
+      if (
+        responseActive
+      ) {
+
+        queuedResponse =
+          true;
+
+        return;
+      }
+
+
+      queuedResponse =
+        false;
+
+
+      toOA({
+
+        type:
+          "response.create"
+      });
+    }
+
+
+    /*
+      The opening greeting is protected.
+      No VAD event is allowed to chop it
+      off in the middle.
+    */
+
+    function greet() {
+
+      if (
+        !ready ||
+        greeted
+      ) {
+
+        return;
+      }
+
+
+      greeted =
+        true;
+
+      greetingPlaying =
+        true;
+
+      assistantPlaying =
+        true;
+
+
+      toOA({
+
+        type:
+          "response.create",
+
+        response: {
+
+          input:
+            [],
+
+          instructions:
+            "Say exactly: Thanks for calling The Farmers Daughters Dispensary. This is Jasmine. How can I help?"
+        }
+      });
+    }
 
 
     async function callTool(e) {
@@ -2512,12 +2550,12 @@ wss.on(
       );
 
 
-      let r;
+      let result;
 
 
       try {
 
-        r =
+        result =
           await tool(
 
             e.name,
@@ -2538,7 +2576,7 @@ wss.on(
         );
 
 
-        r = {
+        result = {
 
           success:
             false,
@@ -2556,7 +2594,7 @@ wss.on(
         e.name,
 
         JSON.stringify(
-          r
+          result
         )
       );
 
@@ -2576,17 +2614,13 @@ wss.on(
 
           output:
             JSON.stringify(
-              r
+              result
             )
         }
       });
 
 
-      toOA({
-
-        type:
-          "response.create"
-      });
+      requestResponse();
     }
 
 
@@ -2659,21 +2693,37 @@ wss.on(
                       "audio/pcmu"
                   },
 
+
+                  /*
+                    IMPORTANT CHANGE:
+
+                    Medium semantic VAD instead
+                    of high.
+
+                    OpenAI still identifies when
+                    speech starts/stops, but it
+                    does NOT automatically interrupt
+                    or create responses.
+
+                    Our code controls both.
+                  */
+
                   turn_detection: {
 
                     type:
                       "semantic_vad",
 
                     eagerness:
-                      "high",
+                      "medium",
 
                     create_response:
-                      true,
+                      false,
 
                     interrupt_response:
-                      true
+                      false
                   }
                 },
+
 
                 output: {
 
@@ -2688,14 +2738,18 @@ wss.on(
                 }
               },
 
+
               instructions:
                 INSTRUCTIONS,
+
 
               tools:
                 TOOLS,
 
+
               tool_choice:
                 "auto",
+
 
               max_output_tokens:
                 300
@@ -2756,6 +2810,43 @@ wss.on(
 
           if (
             e.type ===
+            "response.created"
+          ) {
+
+            responseActive =
+              true;
+
+            return;
+          }
+
+
+          if (
+            e.type ===
+              "response.done" ||
+
+            e.type ===
+              "response.cancelled"
+          ) {
+
+            responseActive =
+              false;
+
+
+            if (
+              queuedResponse &&
+              !greetingPlaying
+            ) {
+
+              requestResponse();
+            }
+
+
+            return;
+          }
+
+
+          if (
+            e.type ===
               "response.output_item.added" &&
 
             e.item?.type ===
@@ -2770,8 +2861,13 @@ wss.on(
             startTs =
               null;
 
+
             mark =
               null;
+
+
+            assistantPlaying =
+              true;
 
 
             return;
@@ -2805,6 +2901,10 @@ wss.on(
             }
 
 
+            assistantPlaying =
+              true;
+
+
             toTw({
 
               event:
@@ -2836,22 +2936,175 @@ wss.on(
           }
 
 
+          /*
+            CALLER STARTED MAKING SOUND
+          */
+
           if (
             e.type ===
             "input_audio_buffer.speech_started"
           ) {
 
+            speechActive =
+              true;
+
+
+            bargeInConfirmed =
+              false;
+
+
+            speechStartedAt =
+              Date.now();
+
+
+            clearSpeechTimer();
+
+
+            /*
+              If Jasmine is talking, require
+              250ms of continuous detected
+              speech before cutting her off.
+
+              A click, breath, echo or tiny
+              burst won't interrupt her.
+            */
+
             if (
-              itemId
+              assistantPlaying &&
+              !greetingPlaying
+            ) {
+
+              speechTimer =
+                setTimeout(
+                  () => {
+
+                    speechTimer =
+                      null;
+
+
+                    if (
+                      !speechActive
+                    ) {
+
+                      return;
+                    }
+
+
+                    bargeInConfirmed =
+                      true;
+
+
+                    cancelAssistantForBargeIn();
+
+                  },
+
+                  BARGE_IN_CONFIRM_MS
+                );
+            }
+
+
+            return;
+          }
+
+
+          /*
+            CALLER STOPPED TALKING
+          */
+
+          if (
+            e.type ===
+            "input_audio_buffer.speech_stopped"
+          ) {
+
+            clearSpeechTimer();
+
+
+            const duration =
+
+              speechStartedAt
+
+                ? Date.now() -
+                  speechStartedAt
+
+                : 0;
+
+
+            const wasBargeInConfirmed =
+              bargeInConfirmed;
+
+
+            speechActive =
+              false;
+
+
+            speechStartedAt =
+              0;
+
+
+            bargeInConfirmed =
+              false;
+
+
+            /*
+              Never interrupt the opening
+              greeting.
+
+              If a caller really talks over
+              it, Jasmine will answer as soon
+              as the greeting finishes.
+            */
+
+            if (
+              greetingPlaying
+            ) {
+
+              if (
+                duration >=
+                BARGE_IN_CONFIRM_MS
+              ) {
+
+                userSpokeDuringGreeting =
+                  true;
+
+
+                console.log(
+                  "Caller spoke during greeting; greeting protected."
+                );
+              }
+
+
+              return;
+            }
+
+
+            /*
+              Jasmine was speaking, but the
+              sound ended before our 250ms
+              interruption threshold.
+
+              Treat it as noise.
+            */
+
+            if (
+              assistantPlaying &&
+              !wasBargeInConfirmed
             ) {
 
               console.log(
-                "Caller interrupted Jasmine."
+
+                `Ignored short interruption noise (${duration} ms).`
               );
 
 
-              clear();
+              return;
             }
+
+
+            /*
+              Valid caller turn.
+            */
+
+            requestResponse();
 
 
             return;
@@ -2910,21 +3163,24 @@ wss.on(
         "close",
 
         (
-          c,
-          r
+          code,
+          reason
         ) => {
 
           ready =
             false;
 
 
+          clearSpeechTimer();
+
+
           console.log(
 
             "OpenAI WebSocket closed:",
 
-            c,
+            code,
 
-            r?.toString?.() ||
+            reason?.toString?.() ||
             ""
           );
 
@@ -2941,9 +3197,9 @@ wss.on(
     }
 
 
-    /* --------------------------------
+    /* =====================================================
        TWILIO EVENTS
-    -------------------------------- */
+    ===================================================== */
 
     tw.on(
 
@@ -3033,7 +3289,7 @@ wss.on(
           "media"
         ) {
 
-          const a =
+          const audio =
             m.media?.payload;
 
 
@@ -3052,7 +3308,7 @@ wss.on(
           }
 
 
-          if (!a) {
+          if (!audio) {
             return;
           }
 
@@ -3068,13 +3324,13 @@ wss.on(
                 "input_audio_buffer.append",
 
               audio:
-                a
+                audio
             });
 
           } else {
 
             pending.push(
-              a
+              audio
             );
 
 
@@ -3095,6 +3351,15 @@ wss.on(
         }
 
 
+        /*
+          Twilio sends this back only after
+          all audio before the mark has
+          actually finished playing.
+
+          That makes it the correct place
+          to unlock the opening greeting.
+        */
+
         if (
           m.event ===
             "mark" &&
@@ -3105,7 +3370,38 @@ wss.on(
             mark
         ) {
 
-          reset();
+          const wasGreeting =
+            greetingPlaying;
+
+
+          resetPlayback();
+
+
+          if (
+            wasGreeting
+          ) {
+
+            greetingPlaying =
+              false;
+
+
+            console.log(
+              "Opening greeting finished playing."
+            );
+
+
+            if (
+              userSpokeDuringGreeting
+            ) {
+
+              userSpokeDuringGreeting =
+                false;
+
+
+              requestResponse();
+            }
+          }
+
 
           return;
         }
@@ -3118,6 +3414,9 @@ wss.on(
 
           stopped =
             true;
+
+
+          clearSpeechTimer();
 
 
           console.log(
@@ -3161,6 +3460,9 @@ wss.on(
           true;
 
 
+        clearSpeechTimer();
+
+
         console.log(
           "Twilio Media Stream closed."
         );
@@ -3178,9 +3480,9 @@ wss.on(
 );
 
 
-/* ================================================================
+/* =========================================================
    START SERVER
-================================================================ */
+========================================================= */
 
 server.listen(
 
@@ -3224,6 +3526,11 @@ server.listen(
         FLOWHUB_CLIENT_ID &&
         FLOWHUB_API_TOKEN
       )}`
+    );
+
+
+    console.log(
+      `Barge-in confirmation: ${BARGE_IN_CONFIRM_MS}ms`
     );
   }
 );
