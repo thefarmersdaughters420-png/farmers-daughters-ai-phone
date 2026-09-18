@@ -1,6 +1,8 @@
 const express = require("express");
-const OpenAI = require("openai");
+const http = require("http");
 const twilio = require("twilio");
+const WebSocket = require("ws");
+const { WebSocketServer } = require("ws");
 const { twiml: { VoiceResponse } } = twilio;
 
 const app = express();
@@ -8,275 +10,71 @@ app.use(express.urlencoded({ extended: false }));
 app.use(express.json());
 
 const PORT = process.env.PORT || 3000;
+const OPENAI_API_KEY = process.env.OPENAI_API_KEY || "";
+const REALTIME_MODEL = process.env.REALTIME_MODEL || "gpt-realtime-2.1";
+const REALTIME_VOICE = process.env.REALTIME_VOICE || "marin";
+const PUBLIC_BASE_URL = (process.env.PUBLIC_BASE_URL || "").trim();
 
-const openai = new OpenAI({
-  apiKey: process.env.OPENAI_API_KEY
-});
-
-// ---------- STORE SETTINGS ----------
-const VOICE = "Polly.Danielle-Neural";
+const FALLBACK_VOICE = "Polly.Danielle-Neural";
 const MENU_URL = "https://www.thefarmersdaughtersdispensary.com/menu";
 const WEBSITE_URL = "https://www.thefarmersdaughtersdispensary.com";
 const STORE_ADDRESS = "1025 Chetco Ave, Brookings, Oregon 97415";
-const STORE_PHONE_SPOKEN = "541-813-1711";
+const STORE_PHONE = "541-813-1711";
+const VENDOR_EMAIL = "brookingsvendors@gmail.com";
 
-// Optional Weedmaps live-menu integration.
-// Add these in Railway Variables when credentials are available.
-const WEEDMAPS_ACCESS_TOKEN = process.env.WEEDMAPS_ACCESS_TOKEN || "";
-const WEEDMAPS_MENU_ID = process.env.WEEDMAPS_MENU_ID || "";
-const WEEDMAPS_API_BASE = "https://api-g.weedmaps.com/wm/2025-07/partners";
+const BLACKLEAF_API_KEY = process.env.BLACKLEAF_API_KEY || "";
+const BLACKLEAF_SMS_URL = "https://api.blackleaf.io/messaging/send/text";
 
-// ---------- CALL MEMORY ----------
-const callMemory = new Map();
-const CALL_MEMORY_TTL_MS = 30 * 60 * 1000;
+const WEEDMAPS_ACCESS_TOKEN =
+  process.env.WEEDMAPS_ACCESS_TOKEN || "";
 
-function getCallState(callSid) {
-  if (!callSid) {
-    return {
-      history: [],
-      pendingAction: null,
-      callerNumber: null,
-      updatedAt: Date.now()
-    };
-  }
+const WEEDMAPS_MENU_ID =
+  process.env.WEEDMAPS_MENU_ID || "";
 
-  const existing = callMemory.get(callSid);
+const WEEDMAPS_API_BASE =
+  "https://api-g.weedmaps.com/wm/2025-07/partners";
 
-  if (existing && Date.now() - existing.updatedAt < CALL_MEMORY_TTL_MS) {
-    existing.updatedAt = Date.now();
-    return existing;
-  }
-
-  const fresh = {
-    history: [],
-    pendingAction: null,
-    callerNumber: null,
-    updatedAt: Date.now()
-  };
-
-  callMemory.set(callSid, fresh);
-  return fresh;
-}
-
-function saveTurn(state, role, content) {
-  state.history.push({ role, content });
-  state.history = state.history.slice(-6);
-  state.updatedAt = Date.now();
-}
-
-// Clean old calls periodically.
-setInterval(() => {
-  const now = Date.now();
-
-  for (const [callSid, state] of callMemory.entries()) {
-    if (now - state.updatedAt > CALL_MEMORY_TTL_MS) {
-      callMemory.delete(callSid);
-    }
-  }
-}, 10 * 60 * 1000).unref();
-
-// ---------- LANGUAGE ----------
-const GREETINGS = [
-  "Thanks for calling The Farmers Daughters Dispensary. This is Jasmine. How can I help?",
-  "The Farmers Daughters Dispensary, this is Jasmine. What can I help you with?",
-  "Thanks for calling The Farmers Daughters Dispensary. This is Jasmine. What can I do for you?"
-];
-
-const NO_INPUT_REPLIES = [
-  "I didn't catch that. Go ahead and ask me again.",
-  "Sorry, I missed that. What can I help you with?",
-  "I didn't hear anything. Try that again for me."
-];
-
-const ERROR_REPLIES = [
-  "Sorry about that. I can help with hours, deals, directions, or text you the menu.",
-  "Sorry, I had trouble with that. Ask me about the menu, hours, deals, or directions."
-];
-
-const SYSTEM_PROMPT = `
-You are Jasmine, the phone assistant for The Farmers Daughters Dispensary in Brookings, Oregon.
-
-Store facts:
-- Address: ${STORE_ADDRESS}
-- Directions: Right off Highway 101, behind Dragon Palace and Rancho Viejo. The shop sits a little back off the road by the tall dispensary sign.
-- Hours: 9 AM to 9 PM every day.
-- Payment: cash and debit.
-- Age requirement: 21 or older with valid ID.
-- Website: ${WEBSITE_URL}
-- Menu and online ordering: ${MENU_URL}
-- Shop phone: ${STORE_PHONE_SPOKEN}
-- First-time discounts: 5 percent first visit, 10 percent second, 15 percent third, 20 percent fourth.
-- Happy hour: every day from 4:20 PM to 6:20 PM, 20 percent off Cookies, Khalifa Kush, Tyson, Select, and Hotbox.
-- Monday: four times loyalty points.
-- Tuesday: 20 percent off infused joints and joint packs.
-- Wednesday: 20 percent off cartridges.
-- Thursday: 20 percent off edibles.
-- Friday: 20 percent off flower in jars.
-- Saturday: 20 percent off dabs, extracts, and rosin.
-- Sunday: 50 percent off ounces in jars.
-- Vendors: brookingsvendors@gmail.com. Showing and samples Monday through Friday.
-
-Phone style:
-- Warm, relaxed and natural.
-- Sound like a knowledgeable budtender.
-- Keep most answers to one short sentence.
-- Never ramble.
-- Do not say you are an AI unless directly asked.
-- Never claim inventory is in stock unless live menu data was successfully checked.
-- Never claim a text was sent unless the application successfully sent it.
-- Never take an order over the phone. Direct ordering to the online menu.
-`;
-
-// ---------- HELPERS ----------
-function pick(arr) {
-  return arr[Math.floor(Math.random() * arr.length)];
-}
-
-function cleanForPhone(text) {
-  if (!text) {
-    return "I don't want to give you the wrong information.";
-  }
-
-  return text
-    .replace(/\s+/g, " ")
-    .trim()
-    .slice(0, 320);
-}
-
-function normalizePhoneNumber(value) {
+function normalizePhone(value) {
   if (!value) return null;
 
   const raw = String(value).trim();
 
-  // Twilio can sometimes use non-phone identities such as client:xxxxx.
   if (/^(client|sip):/i.test(raw)) {
     return null;
   }
 
-  const digits = raw.replace(/\D/g, "");
+  const digits =
+    raw.replace(/\D/g, "");
 
-  // US 10-digit number.
   if (digits.length === 10) {
     return `+1${digits}`;
   }
 
-  // US number already containing country code.
-  if (digits.length === 11 && digits.startsWith("1")) {
+  if (
+    digits.length === 11 &&
+    digits.startsWith("1")
+  ) {
     return `+${digits}`;
   }
 
-  // Generic E.164-compatible international length.
-  if (digits.length >= 8 && digits.length <= 15) {
+  if (
+    digits.length >= 8 &&
+    digits.length <= 15
+  ) {
     return `+${digits}`;
   }
 
   return null;
 }
 
-function getPacificParts() {
-  const formatter = new Intl.DateTimeFormat("en-US", {
-    timeZone: "America/Los_Angeles",
-    weekday: "long",
-    hour: "numeric",
-    minute: "numeric",
-    hour12: false
-  });
-
-  const parts = Object.fromEntries(
-    formatter
-      .formatToParts(new Date())
-      .map(p => [p.type, p.value])
-  );
-
-  return {
-    day: (parts.weekday || "").toLowerCase(),
-    hour: Number(parts.hour),
-    minute: Number(parts.minute)
-  };
-}
-
-function getStoreStatusLine() {
-  const { hour, minute } = getPacificParts();
-
-  const nowMinutes = hour * 60 + minute;
-  const open = 9 * 60;
-  const close = 21 * 60;
-
-  if (nowMinutes < open) {
-    return "We're closed right now and open at 9 AM today.";
-  }
-
-  if (nowMinutes >= close) {
-    return "We're closed for the night and open again at 9 AM tomorrow.";
-  }
-
-  if (nowMinutes >= close - 30) {
-    return "We're open until 9 PM tonight, so we're closing soon.";
-  }
-
-  return "We're open right now until 9 PM.";
-}
-
-function getTodaysDealLine() {
-  const { day } = getPacificParts();
-
-  const deals = {
-    monday: "Today's deal is four times loyalty points.",
-    tuesday: "Today's deal is 20 percent off infused joints and joint packs.",
-    wednesday: "Today's deal is 20 percent off cartridges.",
-    thursday: "Today's deal is 20 percent off edibles.",
-    friday: "Today's deal is 20 percent off flower in jars.",
-    saturday: "Today's deal is 20 percent off dabs, extracts, and rosin.",
-    sunday: "Today's deal is 50 percent off ounces in jars."
-  };
-
-  return deals[day] || "You can check today's deal on our website.";
-}
-
-function isAffirmative(text) {
-  return /^(yes|yeah|yep|sure|please|ok|okay|absolutely|send it|text it|do it|that works)\b/i
-    .test(text.trim());
-}
-
-function isNegative(text) {
-  return /^(no|nope|nah|not right now|i'?m good)\b/i
-    .test(text.trim());
-}
-
-function wantsMenuText(text) {
-  const q = text.toLowerCase();
-
-  return (
-    /(text|send|message).*(menu|link|order|ordering|website)/.test(q) ||
-    /(menu|link|order|ordering|website).*(text|send|message)/.test(q) ||
-    /text me/.test(q) ||
-    /send it to me/.test(q)
-  );
-}
-
-function isOrderingQuestion(text) {
-  return /(how do i order|how can i order|where do i order|can i order online|online order|place an order|order online|ordering link)/i
-    .test(text);
-}
-
-function isInventoryQuestion(text) {
-  return /(do you have|have any|in stock|carry|inventory|what.*(flower|cart|cartridge|edible|preroll|pre-roll|joint|dab|extract|rosin|concentrate|ounce|oz)|what strains|what brands)/i
-    .test(text);
-}
-
-// ---------- BLACKLEAF SMS ----------
-const BLACKLEAF_API_KEY = process.env.BLACKLEAF_API_KEY || "";
-const BLACKLEAF_SMS_URL =
-  "https://api.blackleaf.io/messaging/send/text";
-
-function blackleafPhoneNumber(value) {
-  const phone = normalizePhoneNumber(value);
+function blackleafPhone(value) {
+  const phone =
+    normalizePhone(value);
 
   if (!phone) {
     return null;
   }
 
-  // Blackleaf examples use a 10-digit US destination number.
   if (/^\+1\d{10}$/.test(phone)) {
     return phone.slice(2);
   }
@@ -284,124 +82,351 @@ function blackleafPhoneNumber(value) {
   return phone.replace(/^\+/, "");
 }
 
-async function sendBlackleafText(to, body) {
-  const phone = blackleafPhoneNumber(to);
+function safeJson(
+  value,
+  fallback = {}
+) {
+  try {
+    return value
+      ? JSON.parse(value)
+      : fallback;
+  } catch {
+    return fallback;
+  }
+}
 
-  console.log("Blackleaf SMS destination raw:", to);
+function pretty(value) {
+  try {
+    return JSON.stringify(
+      value,
+      null,
+      2
+    );
+  } catch {
+    return String(value);
+  }
+}
+
+function pacificNow() {
+  const formatter =
+    new Intl.DateTimeFormat(
+      "en-US",
+      {
+        timeZone:
+          "America/Los_Angeles",
+
+        weekday: "long",
+
+        hour: "numeric",
+
+        minute: "numeric",
+
+        hourCycle: "h23"
+      }
+    );
+
+  const parts =
+    Object.fromEntries(
+      formatter
+        .formatToParts(
+          new Date()
+        )
+        .map(
+          part => [
+            part.type,
+            part.value
+          ]
+        )
+    );
+
+  return {
+    day:
+      (
+        parts.weekday || ""
+      ).toLowerCase(),
+
+    hour:
+      Number(parts.hour),
+
+    minute:
+      Number(parts.minute)
+  };
+}
+
+function storeStatus() {
+  const {
+    hour,
+    minute
+  } = pacificNow();
+
+  const now =
+    hour * 60 +
+    minute;
+
+  if (now < 540) {
+    return (
+      "We're closed right now " +
+      "and open at 9 AM today."
+    );
+  }
+
+  if (now >= 1260) {
+    return (
+      "We're closed for the night " +
+      "and open again at 9 AM tomorrow."
+    );
+  }
+
+  if (now >= 1230) {
+    return (
+      "We're open until 9 PM tonight, " +
+      "so we're closing soon."
+    );
+  }
+
+  return (
+    "We're open right now " +
+    "until 9 PM."
+  );
+}
+
+function todaysDeal() {
+  const deals = {
+    monday:
+      "Today's deal is four times loyalty points.",
+
+    tuesday:
+      "Today's deal is 20 percent off infused joints and joint packs.",
+
+    wednesday:
+      "Today's deal is 20 percent off cartridges.",
+
+    thursday:
+      "Today's deal is 20 percent off edibles.",
+
+    friday:
+      "Today's deal is 20 percent off flower in jars.",
+
+    saturday:
+      "Today's deal is 20 percent off dabs, extracts, and rosin.",
+
+    sunday:
+      "Today's deal is 50 percent off ounces in jars."
+  };
+
+  return (
+    deals[pacificNow().day] ||
+    "You can check today's deal on our website."
+  );
+}
+
+function publicWsUrl(req) {
+  if (PUBLIC_BASE_URL) {
+    return (
+      PUBLIC_BASE_URL
+        .replace(
+          /^https:/i,
+          "wss:"
+        )
+        .replace(
+          /^http:/i,
+          "ws:"
+        )
+        .replace(
+          /\/$/,
+          ""
+        ) +
+      "/media-stream"
+    );
+  }
+
+  const host =
+    req.headers[
+      "x-forwarded-host"
+    ] ||
+    req.headers.host;
+
+  return (
+    `wss://${host}` +
+    "/media-stream"
+  );
+}
+
+function socketOpen(ws) {
+  return (
+    ws &&
+    ws.readyState ===
+      WebSocket.OPEN
+  );
+}
+
+// ---------- BLACKLEAF SMS ----------
+
+async function sendBlackleafText(
+  to,
+  body
+) {
+  const phone =
+    blackleafPhone(to);
+
   console.log(
-    "Blackleaf SMS destination normalized:",
+    "Blackleaf destination raw:",
+    to
+  );
+
+  console.log(
+    "Blackleaf destination normalized:",
     phone
   );
 
   if (!phone) {
     throw new Error(
-      `Invalid phone number: ${String(to)}`
+      `Invalid destination phone: ${String(to)}`
     );
   }
 
   if (!BLACKLEAF_API_KEY) {
-    throw new Error("Missing BLACKLEAF_API_KEY");
+    throw new Error(
+      "Missing BLACKLEAF_API_KEY"
+    );
   }
 
-  const controller = new AbortController();
+  const controller =
+    new AbortController();
 
-  const timeout = setTimeout(() => {
-    controller.abort();
-  }, 6000);
+  const timeout =
+    setTimeout(
+      () =>
+        controller.abort(),
+      7000
+    );
 
   let response;
 
   try {
-    response = await fetch(BLACKLEAF_SMS_URL, {
-      method: "POST",
+    response =
+      await fetch(
+        BLACKLEAF_SMS_URL,
+        {
+          method: "POST",
 
-      headers: {
-        Authorization:
-          `Bearer ${BLACKLEAF_API_KEY}`,
-        "Content-Type": "application/json",
-        Accept: "application/json"
-      },
+          headers: {
+            Authorization:
+              `Bearer ${BLACKLEAF_API_KEY}`,
 
-      body: JSON.stringify({
-        to: phone,
-        body,
-        unsubscribeText:
-          "Reply STOP to unsubscribe"
-      }),
+            "Content-Type":
+              "application/json",
 
-      signal: controller.signal
-    });
+            Accept:
+              "application/json"
+          },
 
+          body:
+            JSON.stringify({
+              to: phone,
+
+              body,
+
+              unsubscribeText:
+                "Reply STOP to unsubscribe"
+            }),
+
+          signal:
+            controller.signal
+        }
+      );
   } finally {
     clearTimeout(timeout);
   }
 
-  const responseText =
+  const text =
     await response.text();
 
-  if (!response.ok) {
+  let data;
+
+  try {
+    data =
+      text
+        ? JSON.parse(text)
+        : {};
+  } catch {
+    data = {
+      raw: text
+    };
+  }
+
+  if (
+    !response.ok ||
+    data?.success === false
+  ) {
+    console.error(
+      "Blackleaf SMS rejected:",
+      pretty({
+        httpStatus:
+          response.status,
+
+        response:
+          data
+      })
+    );
+
     throw new Error(
-      `Blackleaf SMS failed (${response.status}): ${
-        responseText.slice(0, 500)
-      }`
+      `Blackleaf SMS failed (${response.status}): ` +
+      pretty(data).slice(
+        0,
+        1800
+      )
     );
   }
 
-  let responseBody = responseText;
-
-  try {
-    responseBody = responseText
-      ? JSON.parse(responseText)
-      : {};
-  } catch {
-    // Keep raw response if Blackleaf
-    // does not return JSON.
-  }
-
   console.log(
-    "Blackleaf SMS sent successfully:",
-    responseBody
+    "Blackleaf SMS accepted:",
+    pretty(data)
   );
 
-  return responseBody;
+  return data;
 }
 
-async function sendMenuText(to) {
+function sendMenuText(to) {
   return sendBlackleafText(
     to,
-    `The Farmers Daughters Dispensary\n` +
-    `Live menu & online ordering: ${MENU_URL}\n` +
-    `1025 Chetco Ave, Brookings\n` +
-    `Open daily 9 AM-9 PM`
+
+    "The Farmers Daughters Dispensary\n" +
+      `Live menu & online ordering: ${MENU_URL}\n` +
+      "1025 Chetco Ave, Brookings\n" +
+      "Open daily 9 AM-9 PM"
   );
 }
 
-async function sendDealsText(to) {
+function sendDealsText(to) {
   return sendBlackleafText(
     to,
-    `The Farmers Daughters Dispensary\n` +
-    `${getTodaysDealLine()}\n` +
-    `Happy hour: 4:20-6:20 PM daily.\n` +
-    `Menu: ${MENU_URL}`
+
+    "The Farmers Daughters Dispensary\n" +
+      `${todaysDeal()}\n` +
+      "Happy hour: 4:20-6:20 PM daily.\n" +
+      `Menu: ${MENU_URL}`
   );
 }
 
-// ---------- WEEDMAPS LIVE MENU ----------
+// ---------- LIVE MENU ----------
+
 let menuCache = {
   items: [],
   fetchedAt: 0
 };
 
-const MENU_CACHE_MS = 45 * 1000;
+const MENU_CACHE_MS =
+  45000;
 
-function liveMenuConfigured() {
-  return Boolean(
-    WEEDMAPS_ACCESS_TOKEN &&
-    WEEDMAPS_MENU_ID
-  );
-}
+const liveMenuConfigured =
+  () =>
+    Boolean(
+      WEEDMAPS_ACCESS_TOKEN &&
+      WEEDMAPS_MENU_ID
+    );
 
-async function fetchLiveMenuItems() {
+async function fetchLiveMenu() {
   if (!liveMenuConfigured()) {
     throw new Error(
       "Live Weedmaps menu is not configured"
@@ -410,14 +435,15 @@ async function fetchLiveMenuItems() {
 
   if (
     menuCache.items.length &&
-    Date.now() - menuCache.fetchedAt <
+    Date.now() -
+      menuCache.fetchedAt <
       MENU_CACHE_MS
   ) {
     return menuCache.items;
   }
 
   let page = 1;
-  let allItems = [];
+  let items = [];
 
   while (page <= 5) {
     const url =
@@ -430,59 +456,71 @@ async function fetchLiveMenuItems() {
     const controller =
       new AbortController();
 
-    const timeout = setTimeout(
-      () => controller.abort(),
-      3500
-    );
+    const timeout =
+      setTimeout(
+        () =>
+          controller.abort(),
+        4000
+      );
 
     let response;
 
     try {
-      response = await fetch(url, {
-        headers: {
-          Authorization:
-            `Bearer ${WEEDMAPS_ACCESS_TOKEN}`,
-          Accept: "application/json"
-        },
+      response =
+        await fetch(
+          url,
+          {
+            headers: {
+              Authorization:
+                `Bearer ${WEEDMAPS_ACCESS_TOKEN}`,
 
-        signal: controller.signal
-      });
+              Accept:
+                "application/json"
+            },
 
+            signal:
+              controller.signal
+          }
+        );
     } finally {
       clearTimeout(timeout);
     }
 
     if (!response.ok) {
-      const body = await response.text();
-
       throw new Error(
-        `Weedmaps ${response.status}: ${
-          body.slice(0, 250)
-        }`
+        `Weedmaps ${response.status}: ` +
+        (
+          await response.text()
+        ).slice(
+          0,
+          500
+        )
       );
     }
 
     const payload =
       await response.json();
 
-    const pageItems =
-      Array.isArray(payload.data)
+    const batch =
+      Array.isArray(
+        payload.data
+      )
         ? payload.data
         : [];
 
-    allItems =
-      allItems.concat(pageItems);
+    items.push(...batch);
 
     const total =
       Number(
-        payload?.meta?.total ||
-        allItems.length
+        payload?.meta
+          ?.total ||
+          items.length
       );
 
     if (
-      !pageItems.length ||
-      allItems.length >= total ||
-      pageItems.length < 150
+      !batch.length ||
+      batch.length < 150 ||
+      items.length >= total
     ) {
       break;
     }
@@ -491,26 +529,27 @@ async function fetchLiveMenuItems() {
   }
 
   menuCache = {
-    items: allItems,
-    fetchedAt: Date.now()
+    items,
+    fetchedAt:
+      Date.now()
   };
 
   console.log(
-    `Live menu refreshed: ${allItems.length} items`
+    `Live menu refreshed: ${items.length} items`
   );
 
-  return allItems;
+  return items;
 }
 
-function itemSearchText(item) {
+function itemText(item) {
   try {
     return JSON
       .stringify(item)
       .toLowerCase();
-
   } catch {
-    return String(item || "")
-      .toLowerCase();
+    return String(
+      item || ""
+    ).toLowerCase();
   }
 }
 
@@ -518,68 +557,81 @@ function itemName(item) {
   return (
     item?.name ||
     item?.product?.name ||
-    item?.brand_product?.name ||
+    item?.brand_product
+      ?.name ||
     item?.external_name ||
     "menu item"
   );
 }
 
-function inventoryKeywords(question) {
-  const stop = new Set([
-    "do",
-    "you",
-    "have",
-    "any",
-    "what",
-    "which",
-    "is",
-    "are",
-    "in",
-    "stock",
-    "carry",
-    "inventory",
-    "right",
-    "now",
-    "today",
-    "please",
-    "can",
-    "i",
-    "get",
-    "me",
-    "your",
-    "the",
-    "a",
-    "an",
-    "of",
-    "some",
-    "kind",
-    "kinds",
-    "available"
-  ]);
+function keywords(question) {
+  const stop =
+    new Set([
+      "do",
+      "you",
+      "have",
+      "any",
+      "what",
+      "which",
+      "is",
+      "are",
+      "in",
+      "stock",
+      "carry",
+      "inventory",
+      "right",
+      "now",
+      "today",
+      "please",
+      "can",
+      "i",
+      "get",
+      "me",
+      "your",
+      "the",
+      "a",
+      "an",
+      "of",
+      "some",
+      "kind",
+      "kinds",
+      "available"
+    ]);
 
-  return question
+  return String(
+    question || ""
+  )
     .toLowerCase()
+
     .replace(
       /pre[\s-]?rolls?/g,
       "preroll"
     )
+
     .replace(
       /cartridges?/g,
       "cartridge"
     )
+
     .replace(
       /carts?/g,
       "cartridge"
     )
+
     .replace(
       /concentrates?/g,
       "concentrate"
     )
+
     .replace(
       /extracts?/g,
       "extract"
     )
-    .split(/[^a-z0-9]+/)
+
+    .split(
+      /[^a-z0-9]+/
+    )
+
     .filter(
       word =>
         word.length > 1 &&
@@ -587,51 +639,64 @@ function inventoryKeywords(question) {
     );
 }
 
-async function answerInventoryQuestion(
+async function checkInventory(
   question
 ) {
   if (!liveMenuConfigured()) {
     return {
-      answered: true,
-      text:
-        "I can check live inventory once the Weedmaps menu connection is turned on. For now, I can text you the live online menu."
+      success: false,
+
+      liveDataChecked:
+        false,
+
+      message:
+        "Live inventory is not connected yet. " +
+        "Do not claim stock. " +
+        "Offer to text the live online menu."
     };
   }
 
   try {
     const items =
-      await fetchLiveMenuItems();
+      await fetchLiveMenu();
 
-    const keywords =
-      inventoryKeywords(question);
+    const terms =
+      keywords(question);
 
-    let matches = items;
+    let matches =
+      terms.length
+        ? items.filter(
+            item =>
+              terms.every(
+                term =>
+                  itemText(
+                    item
+                  ).includes(
+                    term
+                  )
+              )
+          )
+        : items;
 
-    if (keywords.length) {
-      matches = items.filter(item => {
-        const haystack =
-          itemSearchText(item);
-
-        return keywords.every(k =>
-          haystack.includes(k)
+    if (
+      !matches.length &&
+      terms.length
+    ) {
+      matches =
+        items.filter(
+          item =>
+            terms.some(
+              term =>
+                itemText(
+                  item
+                ).includes(
+                  term
+                )
+            )
         );
-      });
-
-      // If strict matching finds nothing,
-      // loosen it to any keyword.
-      if (!matches.length) {
-        matches = items.filter(item => {
-          const haystack =
-            itemSearchText(item);
-
-          return keywords.some(k =>
-            haystack.includes(k)
-          );
-        });
-      }
     }
 
-    const uniqueNames = [
+    const names = [
       ...new Set(
         matches
           .map(itemName)
@@ -639,779 +704,1398 @@ async function answerInventoryQuestion(
       )
     ];
 
-    if (!uniqueNames.length) {
+    if (!names.length) {
       return {
-        answered: true,
-        text:
-          "I checked the live menu and I don't see a match right now. I can text you the menu if you'd like."
+        success: true,
+
+        liveDataChecked:
+          true,
+
+        found: false,
+
+        message:
+          "I checked the live menu and did not find a matching item right now."
       };
     }
 
     const sample =
-      uniqueNames.slice(0, 5);
-
-    if (
-      /do you have|have any|in stock|carry/i
-        .test(question) &&
-      uniqueNames.length <= 5
-    ) {
-      return {
-        answered: true,
-        text:
-          `Yes. I found ${
-            sample.join(", ")
-          } on the live menu.`
-      };
-    }
-
-    const more =
-      uniqueNames.length > sample.length
-        ? `, plus ${
-            uniqueNames.length -
-            sample.length
-          } more`
-        : "";
+      names.slice(
+        0,
+        5
+      );
 
     return {
-      answered: true,
-      text:
-        `On the live menu I found ${
-          sample.join(", ")
-        }${more}.`
-    };
+      success: true,
 
+      liveDataChecked:
+        true,
+
+      found: true,
+
+      totalMatches:
+        names.length,
+
+      matches:
+        sample,
+
+      message:
+        names.length > 5
+          ? `I found ${sample.join(", ")}, plus ${names.length - 5} more on the live menu.`
+          : `I found ${sample.join(", ")} on the live menu.`
+    };
   } catch (error) {
     console.error(
       "Live menu error:",
-      error.message
+      error.message ||
+        error
     );
 
     return {
-      answered: true,
-      text:
-        "I couldn't reach the live menu just now, but I can text you the ordering link."
+      success: false,
+
+      liveDataChecked:
+        false,
+
+      message:
+        "I could not reach the live menu just now. " +
+        "Do not guess inventory. " +
+        "Offer to text the online menu."
     };
   }
 }
 
-// ---------- FAST LOCAL ANSWERS ----------
-function getInstantAnswer(question) {
-  const q = question.toLowerCase();
+// ---------- JASMINE ----------
 
-  if (
-    /(hours|open|close|closing|what time|how late|open tonight|open right now)/
-      .test(q)
-  ) {
-    return getStoreStatusLine();
+const JASMINE_INSTRUCTIONS = `
+You are Jasmine, the phone assistant for The Farmers Daughters Dispensary in Brookings, Oregon.
+
+Speak warmly, casually, confidently, and naturally like a knowledgeable budtender. Keep most answers to one or two short sentences. Do not ramble. Let callers interrupt naturally. Do not say you are an AI unless directly asked. If asked, say you are Jasmine, the shop's automated phone assistant. Never invent store facts, prices, policies, deals, or inventory.
+
+Store facts:
+- Address: ${STORE_ADDRESS}
+- Directions: Right off Highway 101, behind Dragon Palace and Rancho Viejo. The shop sits a little back off the road by the tall dispensary sign.
+- Hours: 9 AM to 9 PM every day.
+- Payment: cash and debit.
+- Age: 21 or older with valid ID.
+- Website: ${WEBSITE_URL}
+- Live menu and online ordering: ${MENU_URL}
+- Shop phone: ${STORE_PHONE}
+- First visit 5 percent off, second 10 percent, third 15 percent, fourth 20 percent.
+- Happy hour every day 4:20 PM to 6:20 PM: 20 percent off Cookies, Khalifa Kush, Tyson, Select, and Hotbox.
+- Monday: four times loyalty points.
+- Tuesday: 20 percent off infused joints and joint packs.
+- Wednesday: 20 percent off cartridges.
+- Thursday: 20 percent off edibles.
+- Friday: 20 percent off flower in jars.
+- Saturday: 20 percent off dabs, extracts, and rosin.
+- Sunday: 50 percent off ounces in jars.
+- Vendors: ${VENDOR_EMAIL}. Showing and samples Monday through Friday.
+
+Rules:
+- For whether the store is open right now, use get_store_status.
+- For today's deal, use get_todays_deal.
+- For any current product, strain, brand, size, category, or stock question, use check_live_inventory. Never guess stock.
+- If inventory is unavailable, say you cannot verify it and offer to text the live menu.
+- If the caller asks to text the menu or ordering link, use send_menu_text immediately. Never claim it sent unless success=true.
+- If the caller asks how to order, say orders go through the online menu and offer to text the link. If they agree, use send_menu_text.
+- If the caller asks to text today's deals, use send_deals_text. Never claim it sent unless success=true.
+- Never take an order over the phone.
+- If a store-specific question is not answered by these facts or tools, use record_unknown_question and say you do not want to give bad information.
+- After a tool returns, answer naturally without talking about tools or APIs.
+`;
+
+const TOOLS = [
+  {
+    type: "function",
+
+    name:
+      "get_store_status",
+
+    description:
+      "Get whether the store is open right now, closed, or closing soon using current Pacific time.",
+
+    parameters: {
+      type: "object",
+
+      properties: {},
+
+      additionalProperties:
+        false
+    }
+  },
+
+  {
+    type: "function",
+
+    name:
+      "get_todays_deal",
+
+    description:
+      "Get today's current daily deal using Pacific time.",
+
+    parameters: {
+      type: "object",
+
+      properties: {},
+
+      additionalProperties:
+        false
+    }
+  },
+
+  {
+    type: "function",
+
+    name:
+      "check_live_inventory",
+
+    description:
+      "Check the live menu for any current product, strain, brand, category, size, or stock request.",
+
+    parameters: {
+      type: "object",
+
+      properties: {
+        query: {
+          type: "string"
+        }
+      },
+
+      required: [
+        "query"
+      ],
+
+      additionalProperties:
+        false
+    }
+  },
+
+  {
+    type: "function",
+
+    name:
+      "send_menu_text",
+
+    description:
+      "Text the live menu and ordering link to the current caller when requested or accepted.",
+
+    parameters: {
+      type: "object",
+
+      properties: {},
+
+      additionalProperties:
+        false
+    }
+  },
+
+  {
+    type: "function",
+
+    name:
+      "send_deals_text",
+
+    description:
+      "Text today's deal and menu link to the current caller when explicitly requested.",
+
+    parameters: {
+      type: "object",
+
+      properties: {},
+
+      additionalProperties:
+        false
+    }
+  },
+
+  {
+    type: "function",
+
+    name:
+      "record_unknown_question",
+
+    description:
+      "Log a store-specific question Jasmine cannot answer reliably for owner review.",
+
+    parameters: {
+      type: "object",
+
+      properties: {
+        question: {
+          type: "string"
+        }
+      },
+
+      required: [
+        "question"
+      ],
+
+      additionalProperties:
+        false
+    }
   }
+];
 
-  if (
-    /(address|where are you|location|directions|where is the store|where are you located)/
-      .test(q)
-  ) {
-    return (
-      "We're at 1025 Chetco Ave in Brookings, " +
-      "right off Highway 101 behind Dragon Palace " +
-      "and Rancho Viejo."
-    );
-  }
-
-  if (
-    /(phone|phone number|store number|shop number)/
-      .test(q)
-  ) {
-    return (
-      `Our shop number is ${
-        STORE_PHONE_SPOKEN
-      }.`
-    );
-  }
-
-  if (
-    /(parking|driveway|hard to find|sign)/
-      .test(q)
-  ) {
-    return (
-      "Look for the tall dispensary sign and driveway. " +
-      "We sit a little back off the road."
-    );
-  }
-
-  if (
-    /(payment|debit|card|cash|atm|cashback|cash back)/
-      .test(q)
-  ) {
-    return "We accept cash and debit.";
-  }
-
-  if (
-    /(age|id|how old|requirement)/
-      .test(q)
-  ) {
-    return (
-      "You must be 21 or older with a valid ID."
-    );
-  }
-
-  if (
-    /(first time|first visit|new customer|first-time)/
-      .test(q)
-  ) {
-    return (
-      "First visit is 5 percent off, second is 10 percent, " +
-      "third is 15, and fourth is 20 percent."
-    );
-  }
-
-  if (
-    /(happy hour|4:20|420 deal)/
-      .test(q)
-  ) {
-    return (
-      "Happy hour is every day from 4:20 to 6:20 " +
-      "with 20 percent off Cookies, Khalifa Kush, Tyson, " +
-      "Select, and Hotbox."
-    );
-  }
-
-  if (
-    /(today'?s deal|deal today|special today|todays special)/
-      .test(q)
-  ) {
-    return getTodaysDealLine();
-  }
-
-  if (
-    /\bmonday\b/.test(q) &&
-    /(deal|special)/.test(q)
-  ) {
-    return (
-      "Monday is four times loyalty points."
-    );
-  }
-
-  if (
-    /\btuesday\b/.test(q) &&
-    /(deal|special)/.test(q)
-  ) {
-    return (
-      "Tuesday is 20 percent off infused joints and joint packs."
-    );
-  }
-
-  if (
-    /\bwednesday\b/.test(q) &&
-    /(deal|special)/.test(q)
-  ) {
-    return (
-      "Wednesday is 20 percent off cartridges."
-    );
-  }
-
-  if (
-    /\bthursday\b/.test(q) &&
-    /(deal|special)/.test(q)
-  ) {
-    return (
-      "Thursday is 20 percent off edibles."
-    );
-  }
-
-  if (
-    /\bfriday\b/.test(q) &&
-    /(deal|special)/.test(q)
-  ) {
-    return (
-      "Friday is 20 percent off flower in jars."
-    );
-  }
-
-  if (
-    /\bsaturday\b/.test(q) &&
-    /(deal|special)/.test(q)
-  ) {
-    return (
-      "Saturday is 20 percent off dabs, extracts, and rosin."
-    );
-  }
-
-  if (
-    /\bsunday\b/.test(q) &&
-    /(deal|special)/.test(q)
-  ) {
-    return (
-      "Sunday is 50 percent off ounces in jars."
-    );
-  }
-
-  if (
-    /(vendor|sales rep|wholesale|appointment|sample|samples)/
-      .test(q)
-  ) {
-    return (
-      "Vendors should email brookingsvendors@gmail.com. " +
-      "Showing and samples can be done Monday through Friday."
-    );
-  }
-
-  if (
-    /(menu|website|online menu)/
-      .test(q) &&
-    !/(text|send|message)/
-      .test(q) &&
-    !isOrderingQuestion(q)
-  ) {
-    return (
-      "The live menu and online ordering are at " +
-      "thefarmersdaughtersdispensary.com slash menu."
-    );
-  }
-
-  return null;
-}
-
-// ---------- TWILIO LISTENING ----------
-function buildListen(
-  vr,
-  retryCount = 0
+async function executeTool(
+  name,
+  args,
+  context
 ) {
-  return vr.gather({
-    input: "speech",
-    speechTimeout: "auto",
-    timeout: 3,
-    action:
-      `/ask?retryCount=${retryCount}`,
-    method: "POST",
-    actionOnEmptyResult: true,
-
-    hints: [
-      "flower",
-      "cartridge",
-      "cart",
-      "preroll",
-      "pre-roll",
-      "edible",
-      "rosin",
-      "dab",
-      "extract",
-      "concentrate",
-      "ounce",
-      "Cookies",
-      "Khalifa Kush",
-      "Tyson",
-      "Select",
-      "Hotbox"
-    ].join(",")
-  });
-}
-
-function continueListening(vr) {
-  buildListen(vr, 0);
-}
-
-// ---------- ROUTES ----------
-app.get("/", (req, res) => {
-  res
-    .status(200)
-    .send(
-      "Jasmine phone server is running."
-    );
-});
-
-app.get("/health", (req, res) => {
-  res.json({
-    ok: true,
-
-    blackleafConfigured:
-      Boolean(BLACKLEAF_API_KEY),
-
-    liveMenuConfigured:
-      liveMenuConfigured(),
-
-    menuCacheItems:
-      menuCache.items.length,
-
-    uptimeSeconds:
-      Math.round(process.uptime())
-  });
-});
-
-app.post("/voice", (req, res) => {
-  const callSid =
-    req.body.CallSid;
-
-  const state =
-    getCallState(callSid);
-
-  state.callerNumber =
-    req.body.From ||
-    req.body.Caller ||
-    req.body.CallerNumber ||
-    null;
-
-  console.log(
-    "Incoming CallSid:",
-    callSid
-  );
-
-  console.log(
-    "Incoming caller number:",
-    state.callerNumber
-  );
-
-  const vr =
-    new VoiceResponse();
-
-  const gather =
-    buildListen(vr, 0);
-
-  gather.say(
-    { voice: VOICE },
-    pick(GREETINGS)
-  );
-
-  res.type("text/xml");
-  res.send(vr.toString());
-});
-
-app.post("/ask", async (req, res) => {
-  const question =
-    (
-      req.body.SpeechResult || ""
-    ).trim();
-
-  const retryCount =
-    parseInt(
-      req.query.retryCount || "0",
-      10
-    );
-
-  const callSid =
-    req.body.CallSid;
-
-  const state =
-    getCallState(callSid);
-
-  const callerNumber =
-    req.body.From ||
-    req.body.Caller ||
-    req.body.CallerNumber ||
-    state.callerNumber ||
-    null;
-
-  if (callerNumber) {
-    state.callerNumber =
-      callerNumber;
+  if (
+    name ===
+    "get_store_status"
+  ) {
+    return {
+      success: true,
+      message:
+        storeStatus()
+    };
   }
 
-  const vr =
-    new VoiceResponse();
+  if (
+    name ===
+    "get_todays_deal"
+  ) {
+    return {
+      success: true,
+      message:
+        todaysDeal()
+    };
+  }
 
-  console.log(
-    "Speech:",
-    question
-  );
+  if (
+    name ===
+    "check_live_inventory"
+  ) {
+    return checkInventory(
+      args?.query || ""
+    );
+  }
 
-  console.log(
-    "Caller for /ask:",
-    callerNumber
-  );
+  if (
+    name ===
+    "send_menu_text"
+  ) {
+    if (
+      !context.callerNumber
+    ) {
+      return {
+        success: false,
 
-  if (!question) {
+        message:
+          "Caller phone number is unavailable. Do not claim a text was sent."
+      };
+    }
 
-    if (retryCount >= 1) {
+    try {
+      const provider =
+        await sendMenuText(
+          context.callerNumber
+        );
+
+      return {
+        success: true,
+
+        message:
+          "The menu and ordering link were sent successfully.",
+
+        provider
+      };
+    } catch (error) {
+      console.error(
+        "SMS menu error:",
+        error.message ||
+          error
+      );
+
+      return {
+        success: false,
+
+        message:
+          "The menu text failed. Do not claim it was sent. Give the website menu address instead."
+      };
+    }
+  }
+
+  if (
+    name ===
+    "send_deals_text"
+  ) {
+    if (
+      !context.callerNumber
+    ) {
+      return {
+        success: false,
+
+        message:
+          "Caller phone number is unavailable. Do not claim a text was sent."
+      };
+    }
+
+    try {
+      const provider =
+        await sendDealsText(
+          context.callerNumber
+        );
+
+      return {
+        success: true,
+
+        message:
+          "Today's deal and menu link were sent successfully.",
+
+        provider
+      };
+    } catch (error) {
+      console.error(
+        "SMS deals error:",
+        error.message ||
+          error
+      );
+
+      return {
+        success: false,
+
+        message:
+          "The deals text failed. Do not claim it was sent."
+      };
+    }
+  }
+
+  if (
+    name ===
+    "record_unknown_question"
+  ) {
+    console.log(
+      "JASMINE_UNKNOWN_QUESTION:",
+
+      pretty({
+        timestamp:
+          new Date()
+            .toISOString(),
+
+        callSid:
+          context.callSid ||
+          null,
+
+        callerNumber:
+          context.callerNumber ||
+          null,
+
+        question:
+          String(
+            args?.question ||
+              ""
+          ).trim()
+      })
+    );
+
+    return {
+      success: true,
+
+      message:
+        "The question was logged for owner review. This is not yet permanent learned memory."
+    };
+  }
+
+  return {
+    success: false,
+
+    message:
+      `Unknown tool: ${name}`
+  };
+}
+
+// ---------- HTTP ----------
+
+app.get(
+  "/",
+
+  (req, res) =>
+    res
+      .status(200)
+      .send(
+        "Jasmine realtime phone server is running."
+      )
+);
+
+app.get(
+  "/health",
+
+  (req, res) =>
+    res.json({
+      ok: true,
+
+      voiceMode:
+        "OpenAI Realtime + Twilio Media Streams",
+
+      realtimeModel:
+        REALTIME_MODEL,
+
+      realtimeVoice:
+        REALTIME_VOICE,
+
+      openaiConfigured:
+        Boolean(
+          OPENAI_API_KEY
+        ),
+
+      blackleafConfigured:
+        Boolean(
+          BLACKLEAF_API_KEY
+        ),
+
+      liveMenuConfigured:
+        liveMenuConfigured(),
+
+      menuCacheItems:
+        menuCache.items
+          .length,
+
+      uptimeSeconds:
+        Math.round(
+          process.uptime()
+        )
+    })
+);
+
+app.post(
+  "/voice",
+
+  (req, res) => {
+    const callSid =
+      req.body.CallSid ||
+      "unknown";
+
+    const callerNumber =
+      req.body.From ||
+      req.body.Caller ||
+      req.body.CallerNumber ||
+      "unknown";
+
+    console.log(
+      "Incoming call:",
+      callSid,
+      callerNumber
+    );
+
+    const vr =
+      new VoiceResponse();
+
+    if (
+      !OPENAI_API_KEY
+    ) {
       vr.say(
-        { voice: VOICE },
+        {
+          voice:
+            FALLBACK_VOICE
+        },
 
-        "Thanks for calling The Farmers Daughters Dispensary. Have a good day."
+        "Sorry, Jasmine is temporarily unavailable. Please visit thefarmersdaughtersdispensary.com or call back shortly."
       );
 
       vr.hangup();
 
-      res.type("text/xml");
+      res.type(
+        "text/xml"
+      );
 
       return res.send(
         vr.toString()
       );
     }
 
-    const gather =
-      buildListen(
-        vr,
-        retryCount + 1
-      );
+    const stream =
+      vr
+        .connect()
+        .stream({
+          url:
+            publicWsUrl(req)
+        });
 
-    gather.say(
-      { voice: VOICE },
-      pick(NO_INPUT_REPLIES)
+    stream.parameter({
+      name:
+        "callSid",
+
+      value:
+        String(callSid)
+    });
+
+    stream.parameter({
+      name:
+        "callerNumber",
+
+      value:
+        String(
+          callerNumber
+        )
+    });
+
+    vr.say(
+      {
+        voice:
+          FALLBACK_VOICE
+      },
+
+      "Sorry, Jasmine lost the connection. The live menu is at thefarmersdaughtersdispensary.com slash menu."
     );
 
-    res.type("text/xml");
+    res.type(
+      "text/xml"
+    );
 
-    return res.send(
+    res.send(
       vr.toString()
     );
   }
+);
 
-  try {
+// ---------- HTTP + WEBSOCKET ----------
 
-    // Caller says yes/no after
-    // Jasmine offered a text.
+const server =
+  http.createServer(app);
+
+const wss =
+  new WebSocketServer({
+    noServer: true
+  });
+
+server.on(
+  "upgrade",
+
+  (
+    request,
+    socket,
+    head
+  ) => {
+    let pathname = "";
+
+    try {
+      pathname =
+        new URL(
+          request.url,
+
+          "http://localhost"
+        ).pathname;
+    } catch {
+      socket.destroy();
+      return;
+    }
+
     if (
-      state.pendingAction ===
-      "sendMenu"
+      pathname !==
+      "/media-stream"
     ) {
+      socket.destroy();
+      return;
+    }
 
-      if (
-        isAffirmative(question)
-      ) {
-        try {
-          await sendMenuText(
-            callerNumber
-          );
+    wss.handleUpgrade(
+      request,
+      socket,
+      head,
 
-          state.pendingAction =
-            null;
+      ws =>
+        wss.emit(
+          "connection",
+          ws,
+          request
+        )
+    );
+  }
+);
 
-          vr.say(
-            { voice: VOICE },
+// ---------- REALTIME BRIDGE ----------
 
-            "Yep, I just texted the menu and ordering link over."
-          );
+wss.on(
+  "connection",
 
-        } catch (error) {
-          console.error(
-            "SMS menu error:",
-            error.message
-          );
+  twilioWs => {
+    console.log(
+      "Twilio Media Stream connected."
+    );
 
-          vr.say(
-            { voice: VOICE },
+    let streamSid = null;
+    let callSid = null;
+    let callerNumber = null;
 
-            "I still couldn't send the text. The menu is on our website."
+    let latestMediaTimestamp =
+      0;
+
+    let assistantStartTimestamp =
+      null;
+
+    let assistantItemId =
+      null;
+
+    let currentMark =
+      null;
+
+    let markCounter = 0;
+
+    let openaiWs = null;
+
+    let sessionReady =
+      false;
+
+    let greetingSent =
+      false;
+
+    let stopped = false;
+
+    let pendingAudio = [];
+
+    const handledCalls =
+      new Set();
+
+    const context = {
+      get callSid() {
+        return callSid;
+      },
+
+      get callerNumber() {
+        return normalizePhone(
+          callerNumber
+        );
+      }
+    };
+
+    const sendTwilio =
+      object => {
+        if (
+          socketOpen(
+            twilioWs
+          )
+        ) {
+          twilioWs.send(
+            JSON.stringify(
+              object
+            )
           );
         }
+      };
 
-        continueListening(vr);
+    const sendOpenAI =
+      object => {
+        if (
+          !socketOpen(
+            openaiWs
+          )
+        ) {
+          return false;
+        }
 
-        res.type("text/xml");
-
-        return res.send(
-          vr.toString()
-        );
-      }
-
-      if (
-        isNegative(question)
-      ) {
-        state.pendingAction =
-          null;
-
-        vr.say(
-          { voice: VOICE },
-          "No problem."
+        openaiWs.send(
+          JSON.stringify(
+            object
+          )
         );
 
-        continueListening(vr);
+        return true;
+      };
 
-        res.type("text/xml");
+    function resetPlayback() {
+      assistantStartTimestamp =
+        null;
 
-        return res.send(
-          vr.toString()
-        );
-      }
+      assistantItemId =
+        null;
 
-      // If they asked something else,
-      // clear the pending offer and
-      // handle the new question.
-      state.pendingAction =
+      currentMark =
         null;
     }
 
-    // Direct menu/order text request.
-    if (
-      wantsMenuText(question)
-    ) {
-      try {
-        await sendMenuText(
-          callerNumber
-        );
-
-        vr.say(
-          { voice: VOICE },
-
-          "Yep, I just texted the menu and ordering link over."
-        );
-
-      } catch (error) {
-        console.error(
-          "SMS menu error:",
-          error.message
-        );
-
-        vr.say(
-          { voice: VOICE },
-
-          "I couldn't send the text, but the menu is on our website."
-        );
+    function clearPlayback() {
+      if (!streamSid) {
+        return;
       }
 
-      continueListening(vr);
+      sendTwilio({
+        event: "clear",
 
-      res.type("text/xml");
-
-      return res.send(
-        vr.toString()
-      );
-    }
-
-    // Direct deals text request.
-    if (
-      /(text|send|message).*(deal|deals|special|specials)|deal.*(text|send|message)|special.*(text|send|message)/i
-        .test(question)
-    ) {
-      try {
-        await sendDealsText(
-          callerNumber
-        );
-
-        vr.say(
-          { voice: VOICE },
-
-          "Yep, I just texted today's deal and the menu over."
-        );
-
-      } catch (error) {
-        console.error(
-          "SMS deals error:",
-          error.message
-        );
-
-        vr.say(
-          { voice: VOICE },
-
-          "I couldn't send the text, but I can tell you today's deal."
-        );
-      }
-
-      continueListening(vr);
-
-      res.type("text/xml");
-
-      return res.send(
-        vr.toString()
-      );
-    }
-
-    // Ordering questions:
-    // offer to text the link
-    // and remember that offer.
-    if (
-      isOrderingQuestion(
-        question
-      )
-    ) {
-      state.pendingAction =
-        "sendMenu";
-
-      vr.say(
-        { voice: VOICE },
-
-        "Orders go through our live online menu. Want me to text you the ordering link?"
-      );
-
-      continueListening(vr);
-
-      res.type("text/xml");
-
-      return res.send(
-        vr.toString()
-      );
-    }
-
-    // Live inventory/menu questions.
-    if (
-      isInventoryQuestion(
-        question
-      )
-    ) {
-      const inventory =
-        await answerInventoryQuestion(
-          question
-        );
-
-      if (
-        /text you|text.*menu|ordering link/i
-          .test(inventory.text)
-      ) {
-        state.pendingAction =
-          "sendMenu";
-      }
-
-      vr.say(
-        { voice: VOICE },
-        inventory.text
-      );
-
-      continueListening(vr);
-
-      res.type("text/xml");
-
-      return res.send(
-        vr.toString()
-      );
-    }
-
-    // Fast local answers avoid
-    // an OpenAI round-trip
-    // and greatly reduce lag.
-    const instant =
-      getInstantAnswer(question);
-
-    if (instant) {
-      vr.say(
-        { voice: VOICE },
-        instant
-      );
-
-      continueListening(vr);
-
-      res.type("text/xml");
-
-      return res.send(
-        vr.toString()
-      );
-    }
-
-    // AI fallback only when
-    // local logic did not
-    // already answer.
-    saveTurn(
-      state,
-      "user",
-      question
-    );
-
-    const aiMessages = [
-      {
-        role: "developer",
-        content: SYSTEM_PROMPT
-      },
-
-      ...state.history
-    ];
-
-    const aiRequest =
-      openai.chat.completions.create({
-        model: "gpt-4.1-mini",
-
-        messages:
-          aiMessages,
-
-        max_completion_tokens:
-          70,
-
-        temperature:
-          0.2
+        streamSid
       });
 
-    const timeout =
-      new Promise(
-        (_, reject) =>
-          setTimeout(
-            () =>
-              reject(
-                new Error(
-                  "AI timeout"
-                )
-              ),
-            4500
+      if (
+        assistantItemId &&
+        assistantStartTimestamp !==
+          null
+      ) {
+        const elapsed =
+          Math.max(
+            0,
+
+            latestMediaTimestamp -
+              assistantStartTimestamp
+          );
+
+        sendOpenAI({
+          type:
+            "conversation.item.truncate",
+
+          item_id:
+            assistantItemId,
+
+          content_index:
+            0,
+
+          audio_end_ms:
+            Math.floor(
+              elapsed
+            )
+        });
+      }
+
+      resetPlayback();
+    }
+
+    function markPlayback() {
+      if (
+        !streamSid ||
+        !assistantItemId
+      ) {
+        return;
+      }
+
+      currentMark =
+        `jasmine-${++markCounter}`;
+
+      sendTwilio({
+        event: "mark",
+
+        streamSid,
+
+        mark: {
+          name:
+            currentMark
+        }
+      });
+    }
+
+    function flushAudio() {
+      if (!sessionReady) {
+        return;
+      }
+
+      for (
+        const audio of
+        pendingAudio
+      ) {
+        sendOpenAI({
+          type:
+            "input_audio_buffer.append",
+
+          audio
+        });
+      }
+
+      pendingAudio = [];
+    }
+
+    function greet() {
+      if (
+        !sessionReady ||
+        greetingSent
+      ) {
+        return;
+      }
+
+      greetingSent = true;
+
+      sendOpenAI({
+        type:
+          "response.create",
+
+        response: {
+          input: [],
+
+          instructions:
+            "Say exactly: Thanks for calling The Farmers Daughters Dispensary. This is Jasmine. How can I help?"
+        }
+      });
+    }
+
+    async function handleToolCall(
+      event
+    ) {
+      if (
+        !event.call_id ||
+        handledCalls.has(
+          event.call_id
+        )
+      ) {
+        return;
+      }
+
+      handledCalls.add(
+        event.call_id
+      );
+
+      const args =
+        safeJson(
+          event.arguments,
+          {}
+        );
+
+      console.log(
+        "Jasmine tool call:",
+        event.name,
+        pretty(args)
+      );
+
+      let result;
+
+      try {
+        result =
+          await executeTool(
+            event.name,
+            args,
+            context
+          );
+      } catch (error) {
+        console.error(
+          "Tool execution error:",
+          error.message ||
+            error
+        );
+
+        result = {
+          success: false,
+
+          message:
+            "The requested action failed. Do not claim it succeeded."
+        };
+      }
+
+      console.log(
+        "Jasmine tool result:",
+        event.name,
+        pretty(result)
+      );
+
+      sendOpenAI({
+        type:
+          "conversation.item.create",
+
+        item: {
+          type:
+            "function_call_output",
+
+          call_id:
+            event.call_id,
+
+          output:
+            JSON.stringify(
+              result
+            )
+        }
+      });
+
+      sendOpenAI({
+        type:
+          "response.create"
+      });
+    }
+
+    function connectOpenAI() {
+      if (
+        openaiWs ||
+        stopped
+      ) {
+        return;
+      }
+
+      if (
+        !OPENAI_API_KEY
+      ) {
+        twilioWs.close();
+        return;
+      }
+
+      openaiWs =
+        new WebSocket(
+          "wss://api.openai.com/v1/realtime" +
+            `?model=${encodeURIComponent(
+              REALTIME_MODEL
+            )}`,
+
+          {
+            headers: {
+              Authorization:
+                `Bearer ${OPENAI_API_KEY}`
+            }
+          }
+        );
+
+      openaiWs.on(
+        "open",
+
+        () => {
+          console.log(
+            `Connected to OpenAI Realtime: ${REALTIME_MODEL}`
+          );
+
+          sendOpenAI({
+            type:
+              "session.update",
+
+            session: {
+              type:
+                "realtime",
+
+              output_modalities: [
+                "audio"
+              ],
+
+              audio: {
+                input: {
+                  format: {
+                    type:
+                      "audio/pcmu"
+                  },
+
+                  turn_detection: {
+                    type:
+                      "semantic_vad",
+
+                    eagerness:
+                      "high",
+
+                    create_response:
+                      true,
+
+                    interrupt_response:
+                      true
+                  }
+                },
+
+                output: {
+                  format: {
+                    type:
+                      "audio/pcmu"
+                  },
+
+                  voice:
+                    REALTIME_VOICE
+                }
+              },
+
+              instructions:
+                JASMINE_INSTRUCTIONS,
+
+              tools:
+                TOOLS,
+
+              tool_choice:
+                "auto",
+
+              max_output_tokens:
+                300
+            }
+          });
+        }
+      );
+
+      openaiWs.on(
+        "message",
+
+        async raw => {
+          let event;
+
+          try {
+            event =
+              JSON.parse(
+                raw.toString()
+              );
+          } catch (error) {
+            console.error(
+              "Bad OpenAI event:",
+              error.message
+            );
+
+            return;
+          }
+
+          if (
+            event.type ===
+            "session.updated"
+          ) {
+            if (
+              !sessionReady
+            ) {
+              sessionReady =
+                true;
+
+              console.log(
+                `Jasmine ready. Voice=${REALTIME_VOICE}, Model=${REALTIME_MODEL}`
+              );
+
+              greet();
+              flushAudio();
+            }
+
+            return;
+          }
+
+          if (
+            event.type ===
+              "response.output_item.added" &&
+            event.item?.type ===
+              "message"
+          ) {
+            assistantItemId =
+              event.item.id ||
+              assistantItemId;
+
+            assistantStartTimestamp =
+              null;
+
+            currentMark =
+              null;
+
+            return;
+          }
+
+          if (
+            event.type ===
+              "response.output_audio.delta" &&
+            event.delta &&
+            streamSid
+          ) {
+            if (
+              event.item_id
+            ) {
+              assistantItemId =
+                event.item_id;
+            }
+
+            if (
+              assistantStartTimestamp ===
+              null
+            ) {
+              assistantStartTimestamp =
+                latestMediaTimestamp;
+            }
+
+            sendTwilio({
+              event:
+                "media",
+
+              streamSid,
+
+              media: {
+                payload:
+                  event.delta
+              }
+            });
+
+            return;
+          }
+
+          if (
+            event.type ===
+            "response.output_audio.done"
+          ) {
+            markPlayback();
+            return;
+          }
+
+          if (
+            event.type ===
+            "input_audio_buffer.speech_started"
+          ) {
+            if (
+              assistantItemId
+            ) {
+              console.log(
+                "Caller interrupted Jasmine."
+              );
+
+              clearPlayback();
+            }
+
+            return;
+          }
+
+          if (
+            event.type ===
+            "response.function_call_arguments.done"
+          ) {
+            await handleToolCall(
+              event
+            );
+
+            return;
+          }
+
+          if (
+            event.type ===
+            "error"
+          ) {
+            console.error(
+              "OpenAI Realtime error:",
+              pretty(event)
+            );
+          }
+        }
+      );
+
+      openaiWs.on(
+        "error",
+
+        error =>
+          console.error(
+            "OpenAI WebSocket error:",
+            error.message ||
+              error
           )
       );
 
-    const response =
-      await Promise.race([
-        aiRequest,
-        timeout
-      ]);
+      openaiWs.on(
+        "close",
 
-    const answer =
-      cleanForPhone(
-        response
-          ?.choices
-          ?.[0]
-          ?.message
-          ?.content ||
-        ""
+        (
+          code,
+          reason
+        ) => {
+          sessionReady =
+            false;
+
+          console.log(
+            "OpenAI WebSocket closed:",
+            code,
+            reason?.toString?.() ||
+              ""
+          );
+
+          if (
+            !stopped &&
+            socketOpen(
+              twilioWs
+            )
+          ) {
+            twilioWs.close();
+          }
+        }
       );
-
-    saveTurn(
-      state,
-      "assistant",
-      answer
-    );
-
-    // If AI offers to text
-    // the menu, remember it.
-    if (
-      /want me to text|i can text|text you.*menu|text you.*link/i
-        .test(answer)
-    ) {
-      state.pendingAction =
-        "sendMenu";
     }
 
-    vr.say(
-      { voice: VOICE },
-      answer
+    twilioWs.on(
+      "message",
+
+      raw => {
+        let message;
+
+        try {
+          message =
+            JSON.parse(
+              raw.toString()
+            );
+        } catch (error) {
+          console.error(
+            "Bad Twilio media message:",
+            error.message
+          );
+
+          return;
+        }
+
+        if (
+          message.event ===
+          "start"
+        ) {
+          streamSid =
+            message.start
+              ?.streamSid ||
+            message.streamSid ||
+            null;
+
+          callSid =
+            message.start
+              ?.customParameters
+              ?.callSid ||
+            message.start
+              ?.callSid ||
+            null;
+
+          callerNumber =
+            message.start
+              ?.customParameters
+              ?.callerNumber ||
+            null;
+
+          console.log(
+            "Twilio stream started:",
+
+            pretty({
+              streamSid,
+
+              callSid,
+
+              callerNumber,
+
+              mediaFormat:
+                message.start
+                  ?.mediaFormat ||
+                {}
+            })
+          );
+
+          connectOpenAI();
+
+          return;
+        }
+
+        if (
+          message.event ===
+          "media"
+        ) {
+          const audio =
+            message.media
+              ?.payload;
+
+          const timestamp =
+            Number(
+              message.media
+                ?.timestamp
+            );
+
+          if (
+            Number.isFinite(
+              timestamp
+            )
+          ) {
+            latestMediaTimestamp =
+              timestamp;
+          }
+
+          if (!audio) {
+            return;
+          }
+
+          if (
+            sessionReady &&
+            socketOpen(
+              openaiWs
+            )
+          ) {
+            sendOpenAI({
+              type:
+                "input_audio_buffer.append",
+
+              audio
+            });
+          } else {
+            pendingAudio.push(
+              audio
+            );
+
+            if (
+              pendingAudio.length >
+              500
+            ) {
+              pendingAudio =
+                pendingAudio.slice(
+                  -500
+                );
+            }
+          }
+
+          return;
+        }
+
+        if (
+          message.event ===
+            "mark" &&
+          currentMark &&
+          message.mark?.name ===
+            currentMark
+        ) {
+          resetPlayback();
+          return;
+        }
+
+        if (
+          message.event ===
+          "stop"
+        ) {
+          stopped = true;
+
+          console.log(
+            "Twilio media stream stopped."
+          );
+
+          if (
+            socketOpen(
+              openaiWs
+            )
+          ) {
+            openaiWs.close();
+          }
+        }
+      }
     );
 
-    continueListening(vr);
+    twilioWs.on(
+      "error",
 
-  } catch (error) {
-
-    console.error(
-      "Server error:",
-      error.message || error
+      error =>
+        console.error(
+          "Twilio WebSocket error:",
+          error.message ||
+            error
+        )
     );
 
-    const gather =
-      buildListen(vr, 1);
+    twilioWs.on(
+      "close",
 
-    gather.say(
-      { voice: VOICE },
-      pick(ERROR_REPLIES)
+      () => {
+        stopped = true;
+
+        console.log(
+          "Twilio Media Stream closed."
+        );
+
+        if (
+          socketOpen(
+            openaiWs
+          )
+        ) {
+          openaiWs.close();
+        }
+      }
     );
   }
+);
 
-  res.type("text/xml");
-
-  res.send(
-    vr.toString()
-  );
-});
-
-app.listen(
+server.listen(
   PORT,
   "0.0.0.0",
-  () => {
 
+  () => {
     console.log(
       `Jasmine server running on port ${PORT}`
     );
 
     console.log(
-      `Blackleaf SMS configured: ${
-        Boolean(
-          BLACKLEAF_API_KEY
-        )
-      }`
+      `Realtime model: ${REALTIME_MODEL}`
     );
 
     console.log(
-      `Live Weedmaps menu configured: ${
-        liveMenuConfigured()
-      }`
+      `Realtime voice: ${REALTIME_VOICE}`
+    );
+
+    console.log(
+      `OpenAI configured: ${Boolean(OPENAI_API_KEY)}`
+    );
+
+    console.log(
+      `Blackleaf SMS configured: ${Boolean(BLACKLEAF_API_KEY)}`
+    );
+
+    console.log(
+      `Live Weedmaps menu configured: ${liveMenuConfigured()}`
     );
   }
 );
